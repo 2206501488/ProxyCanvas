@@ -1,0 +1,13 @@
+{
+  "accounts": [
+    {
+      "label": "luma-main",
+      "wos_session": "Fe26.2*1*...",
+      "team_id": "17f1d168-b5d5-48db-b143-b512d213ce29",
+      "default_realm_id": "9f950114-dc53-4c2a-b122-62d3a172ed58",
+      "enabled": true
+    }
+  ],
+  "timeout": 60,
+  "proxy": ""
+}

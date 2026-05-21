@@ -1,0 +1,91 @@
+# ================================
+# Python
+# ================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+*.manifest
+*.spec
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Distribution / packaging
+build/
+dist/
+wheels/
+
+# ================================
+# Node.js / pnpm
+# ================================
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Vite
+.vite/
+
+# ================================
+# IDE / Editor
+# ================================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# ================================
+# OS Files
+# ================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ================================
+# Logs & Debug
+# ================================
+*.log
+debug.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# ================================
+# Environment & Secrets
+# ================================
+.env
+.env.local
+.env.*.local
+*.pem
+secrets.json
+
+# ================================
+# Temporary Files
+# ================================
+*.tmp
+*.temp
+*.bak
+*.cache
+
+# ================================
+# Project Specific
+# ================================
+# Uncomment if you want to exclude config with API keys
+# backend/config.py
+data/*.sqlite
+data/*.sqlite-*
