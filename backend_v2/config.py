@@ -24,7 +24,7 @@ TELEGRAPH_URL = "https://telegraph-image-92x.pages.dev"
 OPENAI_API_KEY = "chatgpt2api"
 OPENAI_BASE_URL = "http://127.0.0.1:8000/v1"
 OPENAI_IMAGE_MODEL = "gpt-image-2"
-OPENAI_SAVE_DIR = r"F:\BaiduNetdiskDownload\api_tmp"  # 生成图片保存目录
+OPENAI_SAVE_DIR = os.path.join(PROJECT_ROOT, "gallery")  # 生成图片保存目录
 
 # Gallery thumbnail cache. Thumbnails are disposable and can be rebuilt from
 # originals; keep them next to user images rather than inside the code repo.
@@ -36,7 +36,7 @@ GALLERY_THUMBNAIL_CACHE_MAX_GB = 3
 # Nanobanana2 API Key. Use the key configured in your Nanobanana2/Antigravity-Manager service.
 NANOBANANA2_API_KEY = "your-nanobanana2-api-key"
 # Nanobanana2 service address. Change the port to match your local Antigravity-Manager/Nanobanana2 service.
-NANOBANANA2_BASE_URL = "http://127.0.0.1:9000"
+NANOBANANA2_BASE_URL = "http://127.0.0.1:8045"
 NANOBANANA2_SAVE_DIR = OPENAI_SAVE_DIR  # Reuse same save directory
 
 # Nanobanana2 强制预填充破甲词 (绕过大模型内部审查)
