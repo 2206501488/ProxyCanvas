@@ -35,9 +35,13 @@ ProxyCanvas 的图片工作台围绕日常生成流程设计：
 
 ## 界面预览
 
-| 工作台预览 |
-| --- |
-| ![ProxyCanvas Web UI](assets/web_ui.png) |
+| 图廊工作台 | 图片详情 |
+| --- | --- |
+| ![ProxyCanvas gallery UI](assets/web_ui.png) | ![ProxyCanvas image detail UI](assets/pic_ui.png) |
+
+| 任务中心 | 账号池 |
+| --- | --- |
+| ![ProxyCanvas task UI](assets/task_ui.png) | ![ProxyCanvas account UI](assets/account_ui.png) |
 
 ## 支持的外部服务
 
@@ -136,6 +140,9 @@ config/lumalabs_config.json
 ```text
 .
 ├── assets/
+│   ├── account_ui.png
+│   ├── pic_ui.png
+│   ├── task_ui.png
 │   └── web_ui.png
 ├── backend_v2/
 │   ├── routes/
