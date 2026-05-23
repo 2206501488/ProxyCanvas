@@ -15,13 +15,12 @@ import sys
 import time
 import threading
 from PIL import Image, ImageFilter
-from config import API_KEY, API_BASE_URL, TELEGRAPH_URL, OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_IMAGE_MODEL, OPENAI_SAVE_DIR, HTTP_PROXIES
-from config import NANOBANANA2_API_KEY, NANOBANANA2_BASE_URL, NANOBANANA2_SAVE_DIR, ENABLE_NANOBANANA2_JAILBREAK, NANOBANANA2_JAILBREAK_PROMPT
-from config import CLIPROXY_API_KEY, CLIPROXY_BASE_URL, CLIPROXY_SAVE_DIR
-from config import SERVER_PORT, SOUSAKU_CONFIG_PATH
+import config
+from config import TELEGRAPH_URL
 from config import JOBS_DB_PATH, JOB_WORKER_ENABLED, JOB_WORKER_MAX_WORKERS, JOB_PROVIDER_LIMITS
 from services.reference_cache import load_reference_image
 from services.jobs import JobStore, JobWorker
+from services import provider_registry
 import concurrent.futures
 import openai
 
@@ -250,6 +249,7 @@ class SousakuProgressPanel:
 
 
 _SOUSAKU_PROGRESS_PANEL = SousakuProgressPanel()
+_LOG_OUTPUT_LOCK = threading.RLock()
 
 
 def log_event(scope, message, level="INFO", icon=None, **fields):
@@ -297,9 +297,10 @@ def log_event(scope, message, level="INFO", icon=None, **fields):
     line = f"{prefix} {message}"
     if field_text:
         line += f" | {field_text}"
-    _SOUSAKU_PROGRESS_PANEL.before_log()
-    print(line, flush=True)
-    _SOUSAKU_PROGRESS_PANEL.after_log()
+    with _LOG_OUTPUT_LOCK:
+        _SOUSAKU_PROGRESS_PANEL.before_log()
+        print(line, flush=True)
+        _SOUSAKU_PROGRESS_PANEL.after_log()
 
 
 _SOUSAKU_TASK_LOG_STATE = {}
@@ -440,6 +441,8 @@ def _log_sousaku_task_progress(task_id, result):
 MAX_FILE_SIZE = 10 * 1024 * 1024
 
 app = Flask(__name__)
+app.json.ensure_ascii = False
+app.json.compact = True
 CORS(app)
 app.config["APIMART_LOG_EVENT"] = log_event
 
@@ -447,6 +450,7 @@ from routes.capabilities import capabilities_bp
 from routes.files import files_bp
 from routes.gallery import gallery_bp
 from routes.imports import imports_bp
+from routes.settings import settings_bp
 from services.sousaku_provider import create_task as create_sousaku_task, get_task as get_sousaku_task, refresh_account_records as refresh_sousaku_account_records
 from services.sousaku_provider import refresh_account_records_for_tokens as refresh_sousaku_account_records_for_tokens
 
@@ -454,6 +458,7 @@ app.register_blueprint(capabilities_bp)
 app.register_blueprint(files_bp)
 app.register_blueprint(gallery_bp)
 app.register_blueprint(imports_bp)
+app.register_blueprint(settings_bp)
 
 _JOB_STORE = JobStore(JOBS_DB_PATH)
 _JOB_WORKER = JobWorker(
@@ -509,19 +514,19 @@ def _update_legacy_provider_job_count_progress(data, done, requested):
 
 # OpenAI Client for Images API
 openai_client = openai.OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url=OPENAI_BASE_URL
+    api_key=config.OPENAI_API_KEY,
+    base_url=config.OPENAI_BASE_URL
 )
 
 def _chatgpt2api_root_url():
-    base = OPENAI_BASE_URL.rstrip("/")
+    base = config.OPENAI_BASE_URL.rstrip("/")
     return base[:-3] if base.endswith("/v1") else base
 
 
 def _chatgpt2api_headers():
     headers = {}
-    if OPENAI_API_KEY:
-        headers["Authorization"] = f"Bearer {OPENAI_API_KEY}"
+    if config.OPENAI_API_KEY:
+        headers["Authorization"] = f"Bearer {config.OPENAI_API_KEY}"
     return headers
 
 
@@ -540,7 +545,7 @@ def _reference_images_to_uploads(image_urls):
                 uploads.append(("image", (f"ref_{idx}.{ext}", image_data, mime_type)))
             else:
                 log_event("CHATGPT2API", "准备参考图", "DEBUG", index=idx, url=url[:80])
-                image = load_reference_image(url, timeout=30, proxies=HTTP_PROXIES)
+                image = load_reference_image(url, timeout=30, proxies=config.HTTP_PROXIES)
                 uploads.append(("image", (f"ref_{idx}.{image.suffix.lstrip('.')}", image.data, image.content_type)))
         except Exception as e:
             log_event("CHATGPT2API", "参考图处理失败", "WARN", index=idx, error=e)
@@ -550,11 +555,11 @@ def _reference_images_to_uploads(image_urls):
 def _save_openai_task_image(image_url, task_id, index=0):
     if not image_url:
         return None
-    os.makedirs(OPENAI_SAVE_DIR, exist_ok=True)
+    os.makedirs(config.OPENAI_SAVE_DIR, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     suffix = os.urandom(2).hex().upper()
     filename = f"openai_task_{timestamp}_{task_id[:8]}_{index+1:02d}_{suffix}.png"
-    filepath = os.path.join(OPENAI_SAVE_DIR, filename)
+    filepath = os.path.join(config.OPENAI_SAVE_DIR, filename)
 
     if image_url.startswith("data:"):
         _, b64_data = image_url.split(",", 1)
@@ -562,7 +567,7 @@ def _save_openai_task_image(image_url, task_id, index=0):
     elif len(image_url) > 100 and not image_url.startswith(("http://", "https://", "/")):
         image_bytes = base64.b64decode(image_url)
     else:
-        proxies = None if "127.0.0.1" in image_url or "localhost" in image_url else HTTP_PROXIES
+        proxies = None if "127.0.0.1" in image_url or "localhost" in image_url else config.HTTP_PROXIES
         response = requests.get(image_url, timeout=120, proxies=proxies)
         response.raise_for_status()
         image_bytes = response.content
@@ -582,14 +587,14 @@ def _save_openai_task_image(image_url, task_id, index=0):
 
 # CLIProxyAPI Client (OpenAI-compatible local proxy for Codex/Claude/Gemini OAuth)
 cliproxy_client = openai.OpenAI(
-    api_key=CLIPROXY_API_KEY,
-    base_url=CLIPROXY_BASE_URL
+    api_key=config.CLIPROXY_API_KEY,
+    base_url=config.CLIPROXY_BASE_URL
 )
 
 # API Headers
 def get_headers():
     return {
-        "Authorization": f"Bearer {API_KEY}",
+        "Authorization": f"Bearer {config.API_KEY}",
         "Content-Type": "application/json"
     }
 
@@ -634,7 +639,7 @@ def get_balance():
     """Query account token balance"""
     try:
         response = requests.get(
-            f"{API_BASE_URL}/v1/balance",
+            f"{config.API_BASE_URL}/v1/balance",
             headers=get_headers()
         )
         return jsonify(response.json())
@@ -699,7 +704,7 @@ def generate_image():
         )
         
         response = requests.post(
-            f"{API_BASE_URL}/v1/images/generations",
+            f"{config.API_BASE_URL}/v1/images/generations",
             headers=get_headers(),
             json=payload
         )
@@ -732,21 +737,21 @@ def generate_image_openai():
         # Handle reference images if provided (as base64 data URIs or URLs)
         image_urls = data.get("image_urls", [])
         
-        log_event("CHATGPT2API", "开始生成", icon="▶️", prompt=prompt, model=OPENAI_IMAGE_MODEL, ratio=ratio, n=n, refs=len(image_urls))
+        log_event("CHATGPT2API", "开始生成", icon="▶️", prompt=prompt, model=config.OPENAI_IMAGE_MODEL, ratio=ratio, n=n, refs=len(image_urls))
         
         # Ensure save directory exists
-        os.makedirs(OPENAI_SAVE_DIR, exist_ok=True)
+        os.makedirs(config.OPENAI_SAVE_DIR, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         results = []
         
         # Build API request using multipart format
-        api_url = f"{OPENAI_BASE_URL}/images/edits"
-        headers = {"Authorization": f"Bearer {OPENAI_API_KEY}"}
+        api_url = f"{config.OPENAI_BASE_URL}/images/edits"
+        headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
         
         # Prepare multipart data
         form_data = {
             "prompt": prompt if not image_urls else f"请根据参考图中的人物形象生成图片，保持人物特征一致。\n\n{prompt}",
-            "model": OPENAI_IMAGE_MODEL,
+            "model": config.OPENAI_IMAGE_MODEL,
             "n": "1",
             "size": ratio,
             "response_format": "b64_json",
@@ -779,7 +784,7 @@ def generate_image_openai():
                     # It's a URL, download it first
                     try:
                         log_event("CHATGPT2API", "准备参考图", "DEBUG", url=url[:80])
-                        image = load_reference_image(url, timeout=30, proxies=HTTP_PROXIES)
+                        image = load_reference_image(url, timeout=30, proxies=config.HTTP_PROXIES)
                         files.append(("image", (f"ref_{idx}.{image.suffix.lstrip('.')}", image.data, image.content_type)))
                     except Exception as e:
                         log_event("CHATGPT2API", "参考图下载失败", "WARN", index=idx, error=e)
@@ -791,10 +796,10 @@ def generate_image_openai():
             if not files:
                 if request_idx == 0:
                     log_event("CHATGPT2API", "选择接口", "DEBUG", route="images/generations")
-                api_url = f"{OPENAI_BASE_URL}/images/generations"
+                api_url = f"{config.OPENAI_BASE_URL}/images/generations"
                 json_payload = {
                     "prompt": prompt,
-                    "model": OPENAI_IMAGE_MODEL,
+                    "model": config.OPENAI_IMAGE_MODEL,
                     "n": 1,
                     "size": ratio,
                     "response_format": "b64_json",
@@ -824,7 +829,7 @@ def generate_image_openai():
             if b64:
                 try:
                     filename = f"openai_{timestamp}_{idx+1:02d}_{os.urandom(2).hex().upper()}.png"
-                    filepath = os.path.join(OPENAI_SAVE_DIR, filename)
+                    filepath = os.path.join(config.OPENAI_SAVE_DIR, filename)
                     with open(filepath, "wb") as f:
                         f.write(base64.b64decode(b64))
                     with Image.open(filepath) as saved_img:
@@ -856,7 +861,7 @@ def generate_image_openai():
             "success": True,
             "data": results,
             "count": len(results),
-            "save_dir": OPENAI_SAVE_DIR
+            "save_dir": config.OPENAI_SAVE_DIR
         })
         
     except requests.exceptions.Timeout:
@@ -888,7 +893,7 @@ def generate_image_openai_tasks():
         headers = _chatgpt2api_headers()
         tasks = []
         mode = "edits" if uploads else "generations"
-        log_event("CHATGPT2API", "提交任务", icon="▶️", prompt=prompt, model=OPENAI_IMAGE_MODEL, ratio=ratio, n=n, refs=len(image_urls), mode=mode)
+        log_event("CHATGPT2API", "提交任务", icon="▶️", prompt=prompt, model=config.OPENAI_IMAGE_MODEL, ratio=ratio, n=n, refs=len(image_urls), mode=mode)
 
         for idx in range(n):
             client_task_id = f"apimart-{int(time.time() * 1000)}-{idx}-{os.urandom(2).hex()}"
@@ -896,7 +901,7 @@ def generate_image_openai_tasks():
                 form_data = {
                     "client_task_id": client_task_id,
                     "prompt": f"请根据参考图中的人物形象生成图片，保持人物特征一致。\n\n{prompt}",
-                    "model": OPENAI_IMAGE_MODEL,
+                    "model": config.OPENAI_IMAGE_MODEL,
                     "size": ratio,
                 }
                 response = requests.post(
@@ -910,7 +915,7 @@ def generate_image_openai_tasks():
                 payload = {
                     "client_task_id": client_task_id,
                     "prompt": prompt,
-                    "model": OPENAI_IMAGE_MODEL,
+                    "model": config.OPENAI_IMAGE_MODEL,
                     "size": ratio,
                 }
                 response = requests.post(
@@ -1048,7 +1053,7 @@ def generate_image_nanobanana2():
                 else:
                     # External URL - download and convert to base64
                     log_event("NANOBANANA2", "准备参考图", "DEBUG", index=idx, url=url[:80])
-                    image = load_reference_image(url, timeout=30, proxies=HTTP_PROXIES)
+                    image = load_reference_image(url, timeout=30, proxies=config.HTTP_PROXIES)
                     b64 = base64.b64encode(image.data).decode("utf-8")
                     parts.append({"inlineData": {"mimeType": image.content_type, "data": b64}})
             except Exception as e:
@@ -1078,10 +1083,10 @@ def generate_image_nanobanana2():
         ]
 
         # 如果在 config 中开启了强制突破限制，则追加模型伪装确认的上下文
-        if ENABLE_NANOBANANA2_JAILBREAK and NANOBANANA2_JAILBREAK_PROMPT:
+        if config.ENABLE_NANOBANANA2_JAILBREAK and config.NANOBANANA2_JAILBREAK_PROMPT:
             contents_list.append({
                 "role": "model",
-                "parts": [{"text": NANOBANANA2_JAILBREAK_PROMPT}]
+                "parts": [{"text": config.NANOBANANA2_JAILBREAK_PROMPT}]
             })
 
         # Build Gemini native request payload
@@ -1108,10 +1113,10 @@ def generate_image_nanobanana2():
             ]
         }
 
-        api_url = f"{NANOBANANA2_BASE_URL}/v1beta/models/gemini-3.1-flash-image:generateContent"
+        api_url = f"{config.NANOBANANA2_BASE_URL}/v1beta/models/gemini-3.1-flash-image:generateContent"
         nb2_headers = {}
-        if NANOBANANA2_API_KEY:
-            nb2_headers["Authorization"] = f"Bearer {NANOBANANA2_API_KEY}"
+        if config.NANOBANANA2_API_KEY:
+            nb2_headers["Authorization"] = f"Bearer {config.NANOBANANA2_API_KEY}"
 
         # Send N concurrent requests
         def _send_one(idx):
@@ -1135,7 +1140,7 @@ def generate_image_nanobanana2():
                     _update_legacy_provider_job_count_progress(data, len(raw_results), n)
 
         # Parse responses and save images
-        os.makedirs(NANOBANANA2_SAVE_DIR, exist_ok=True)
+        os.makedirs(config.NANOBANANA2_SAVE_DIR, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         results = []
         thought_images = []  # 收集草图（thought阶段的图片）
@@ -1170,7 +1175,7 @@ def generate_image_nanobanana2():
 
                         img_counter += 1
                         filename = f"nb2_{timestamp}_{img_counter:02d}_{os.urandom(2).hex().upper()}.{ext}"
-                        filepath = os.path.join(NANOBANANA2_SAVE_DIR, filename)
+                        filepath = os.path.join(config.NANOBANANA2_SAVE_DIR, filename)
 
                         try:
                             with open(filepath, "wb") as f:
@@ -1202,7 +1207,7 @@ def generate_image_nanobanana2():
             "data": results,
             "thought_images": thought_images,
             "count": len(results),
-            "save_dir": NANOBANANA2_SAVE_DIR
+            "save_dir": config.NANOBANANA2_SAVE_DIR
         })
 
     except requests.exceptions.Timeout:
@@ -1281,7 +1286,7 @@ def _decode_mask_data(mask_data: str, feather: int = 0, target_size: tuple = Non
 # ============ CLIProxyAPI (Codex/Claude/Gemini OAuth Local Proxy) ============
 
 def _cliproxy_root_url():
-    base = CLIPROXY_BASE_URL.rstrip("/")
+    base = config.CLIPROXY_BASE_URL.rstrip("/")
     return base[:-3] if base.endswith("/v1") else base
 
 
@@ -1298,7 +1303,7 @@ def _build_gemini_image_parts(prompt, image_urls, mask_data_raw=None, feather=0,
                 parts.append({"inlineData": {"mimeType": mime_type, "data": b64_data}})
             else:
                 log_event(scope, "准备参考图", "DEBUG", index=idx, url=url[:80])
-                image = load_reference_image(url, timeout=30, proxies=HTTP_PROXIES)
+                image = load_reference_image(url, timeout=30, proxies=config.HTTP_PROXIES)
                 b64 = base64.b64encode(image.data).decode("utf-8")
                 parts.append({"inlineData": {"mimeType": image.content_type, "data": b64}})
         except Exception as e:
@@ -1354,7 +1359,7 @@ def _save_cliproxy_gemini_image(image, timestamp, img_counter):
         ext = "webp"
 
     filename = f"cliproxy_gemini_{timestamp}_{img_counter:02d}_{os.urandom(2).hex().upper()}.{ext}"
-    filepath = os.path.join(CLIPROXY_SAVE_DIR, filename)
+    filepath = os.path.join(config.CLIPROXY_SAVE_DIR, filename)
     with open(filepath, "wb") as f:
         f.write(base64.b64decode(image["b64"]))
     log_event("CLIPROXY", "保存图片", "OK", icon="🖼️", file=filename)
@@ -1369,7 +1374,7 @@ def _save_cliproxy_gemini_image(image, timestamp, img_counter):
 
 def _generate_cliproxy_gemini_flash_image(prompt, ratio, resolution, quality, n, image_urls, mask_data_raw=None, feather=0, job_data=None):
     try:
-        os.makedirs(CLIPROXY_SAVE_DIR, exist_ok=True)
+        os.makedirs(config.CLIPROXY_SAVE_DIR, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         quality_to_size = {"low": "1K", "medium": "2K", "high": "4K", "auto": "4K"}
         image_size = resolution if resolution in {"1K", "2K", "4K"} else quality_to_size.get(str(quality).lower(), "4K")
@@ -1399,7 +1404,7 @@ def _generate_cliproxy_gemini_flash_image(prompt, ratio, resolution, quality, n,
         }
 
         api_url = f"{_cliproxy_root_url()}/api/provider/antigravity/v1beta/models/gemini-3.1-flash-image:generateContent"
-        headers = {"Authorization": f"Bearer {CLIPROXY_API_KEY}"}
+        headers = {"Authorization": f"Bearer {config.CLIPROXY_API_KEY}"}
 
         def _send_one(idx):
             try:
@@ -1460,7 +1465,7 @@ def _generate_cliproxy_gemini_flash_image(prompt, ratio, resolution, quality, n,
             "data": results,
             "thought_images": thought_images,
             "count": len(results),
-            "save_dir": CLIPROXY_SAVE_DIR,
+            "save_dir": config.CLIPROXY_SAVE_DIR,
         })
     except Exception as e:
         log_event("CLIPROXY", "Gemini生成异常", "ERROR", error=e)
@@ -1530,7 +1535,7 @@ def generate_image_cliproxy():
         size = _resolve_cliproxy_openai_size(size, data.get("resolution"))
 
         # Ensure save directory exists
-        os.makedirs(CLIPROXY_SAVE_DIR, exist_ok=True)
+        os.makedirs(config.CLIPROXY_SAVE_DIR, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         results = []
 
@@ -1543,16 +1548,16 @@ def generate_image_cliproxy():
                     one_form = dict(form_data_for_reuse)  # shallow copy
                     one_form["n"] = "1"
                     resp = requests.post(
-                        f"{CLIPROXY_BASE_URL}/images/edits",
+                        f"{config.CLIPROXY_BASE_URL}/images/edits",
                         files=files_for_reuse,  # same ref images for all
                         data=one_form,
-                        headers={"Authorization": f"Bearer {CLIPROXY_API_KEY}"},
+                        headers={"Authorization": f"Bearer {config.CLIPROXY_API_KEY}"},
                         timeout=1200
                     )
                 else:
                     # images/generations (no reference images)
                     resp = requests.post(
-                        f"{CLIPROXY_BASE_URL}/images/generations",
+                        f"{config.CLIPROXY_BASE_URL}/images/generations",
                         json={
                             "prompt": prompt,
                             "model": model,
@@ -1563,7 +1568,7 @@ def generate_image_cliproxy():
                             "output_format": "png",
                             "response_format": "b64_json",
                         },
-                        headers={"Authorization": f"Bearer {CLIPROXY_API_KEY}"},
+                        headers={"Authorization": f"Bearer {config.CLIPROXY_API_KEY}"},
                         timeout=1200
                     )
                 if resp.status_code != 200:
@@ -1607,7 +1612,7 @@ def generate_image_cliproxy():
                 else:
                     try:
                         log_event("CLIPROXY", "准备参考图", "DEBUG", index=idx, url=url[:80])
-                        image = load_reference_image(url, timeout=30, proxies=HTTP_PROXIES)
+                        image = load_reference_image(url, timeout=30, proxies=config.HTTP_PROXIES)
                         image_data = image.data
                         content_type = image.content_type
                         suffix = image.suffix
@@ -1650,7 +1655,10 @@ def generate_image_cliproxy():
                     raw_results.append(res)
                     _update_legacy_provider_job_count_progress(data, len(raw_results), n)
 
-        log_event("CLIPROXY", "生成完成", "OK", success=len(raw_results), requested=n)
+        if raw_results:
+            log_event("CLIPROXY", "生成完成", "OK", success=len(raw_results), requested=n)
+        else:
+            log_event("CLIPROXY", "生成失败", "ERROR", success=0, requested=n, base_url=config.CLIPROXY_BASE_URL)
 
         # ── Parse all responses and save images ──
         for ri, one_result in enumerate(raw_results):
@@ -1661,7 +1669,7 @@ def generate_image_cliproxy():
                     try:
                         img_idx = len(results) + 1
                         filename = f"cliproxy_{timestamp}_{img_idx:02d}_{os.urandom(2).hex().upper()}.png"
-                        filepath = os.path.join(CLIPROXY_SAVE_DIR, filename)
+                        filepath = os.path.join(config.CLIPROXY_SAVE_DIR, filename)
                         with open(filepath, "wb") as f:
                             f.write(base64.b64decode(b64))
                         with Image.open(filepath) as saved_img:
@@ -1692,7 +1700,7 @@ def generate_image_cliproxy():
             "success": True,
             "data": results,
             "count": len(results),
-            "save_dir": CLIPROXY_SAVE_DIR
+            "save_dir": config.CLIPROXY_SAVE_DIR
         })
 
     except requests.exceptions.Timeout:
@@ -1775,7 +1783,18 @@ def _job_provider_from_request(data):
 
 
 def _normalize_job_images(data):
-    images = data.get("image_urls") or data.get("input_images") or []
+    params = data.get("params") if isinstance(data.get("params"), dict) else {}
+    images = (
+        data.get("image_urls")
+        or data.get("imageUrls")
+        or data.get("input_images")
+        or data.get("inputImages")
+        or params.get("image_urls")
+        or params.get("imageUrls")
+        or params.get("input_images")
+        or params.get("inputImages")
+        or []
+    )
     normalized = []
     for item in images:
         if isinstance(item, dict):
@@ -1794,8 +1813,12 @@ def create_job():
         provider = _job_provider_from_request(data)
         if not provider:
             return jsonify({"success": False, "error": {"message": "provider is required"}}), 400
+        if not provider_registry.is_enabled(provider):
+            return jsonify({"success": False, "error": {"message": f"provider disabled or unknown: {provider}"}}), 400
         if provider not in _JOB_WORKER.adapters:
-            return jsonify({"success": False, "error": {"message": f"unknown provider: {provider}"}}), 400
+            configure_job_provider_adapters()
+        if provider not in _JOB_WORKER.adapters:
+            return jsonify({"success": False, "error": {"message": f"provider has no adapter: {provider}"}}), 400
 
         prompt = data.get("prompt") or ""
         if not prompt:
@@ -1990,7 +2013,7 @@ def add_sousaku_tokens():
 
         config_payload["tokens"] = current
         config_payload.pop("token", None)
-        with open(SOUSAKU_CONFIG_PATH, "w", encoding="utf-8") as f:
+        with open(config.SOUSAKU_CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config_payload, f, ensure_ascii=False, indent=2)
 
         records = refresh_sousaku_account_records_for_tokens(added)
@@ -2119,7 +2142,7 @@ def delete_sousaku_account(account_id):
 
 def _read_sousaku_config_payload() -> dict:
     try:
-        with open(SOUSAKU_CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+        with open(config.SOUSAKU_CONFIG_PATH, "r", encoding="utf-8-sig") as f:
             payload = json.load(f)
         return payload if isinstance(payload, dict) else {}
     except FileNotFoundError:
@@ -2127,13 +2150,13 @@ def _read_sousaku_config_payload() -> dict:
 
 
 def _write_sousaku_config_payload(payload: dict) -> None:
-    os.makedirs(os.path.dirname(os.path.abspath(SOUSAKU_CONFIG_PATH)), exist_ok=True)
-    with open(SOUSAKU_CONFIG_PATH, "w", encoding="utf-8") as f:
+    os.makedirs(os.path.dirname(os.path.abspath(config.SOUSAKU_CONFIG_PATH)), exist_ok=True)
+    with open(config.SOUSAKU_CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def _sousaku_accounts_path() -> str:
-    config_dir = os.path.dirname(os.path.abspath(SOUSAKU_CONFIG_PATH))
+    config_dir = os.path.dirname(os.path.abspath(config.SOUSAKU_CONFIG_PATH))
     config_payload = _read_sousaku_config_payload()
     accounts_path = config_payload.get("accounts_path") or "sousaku_accounts.json"
     return accounts_path if os.path.isabs(accounts_path) else os.path.join(config_dir, accounts_path)
@@ -2244,10 +2267,10 @@ def save_thought_image():
         elif "webp" in mime_type:
             ext = "webp"
         
-        os.makedirs(NANOBANANA2_SAVE_DIR, exist_ok=True)
+        os.makedirs(config.NANOBANANA2_SAVE_DIR, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         filename = f"thought_{timestamp}_{os.urandom(4).hex().upper()}.{ext}"
-        filepath = os.path.join(NANOBANANA2_SAVE_DIR, filename)
+        filepath = os.path.join(config.NANOBANANA2_SAVE_DIR, filename)
         
         with open(filepath, "wb") as f:
             f.write(base64.b64decode(b64_data))
@@ -2272,7 +2295,7 @@ def get_task_status(task_id):
     for attempt in range(max_retries):
         try:
             response = requests.get(
-                f"{API_BASE_URL}/v1/tasks/{task_id}",
+                f"{config.API_BASE_URL}/v1/tasks/{task_id}",
                 headers=get_headers(),
                 params={"language": "zh"},
                 timeout=30
@@ -2356,7 +2379,7 @@ def download_apimart_image(url):
             return None
             
         # Ensure save directory exists
-        os.makedirs(OPENAI_SAVE_DIR, exist_ok=True)
+        os.makedirs(config.OPENAI_SAVE_DIR, exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         
         # Check if URL is actually a base64 string
@@ -2382,7 +2405,7 @@ def download_apimart_image(url):
             
         if is_base64:
             filename = f"apimart_{timestamp}_{os.urandom(4).hex().upper()}.{ext}"
-            filepath = os.path.join(OPENAI_SAVE_DIR, filename)
+            filepath = os.path.join(config.OPENAI_SAVE_DIR, filename)
             with open(filepath, 'wb') as f:
                 f.write(img_data)
             log_event("APIMART", "保存base64图片", "OK", icon="🖼️", file=filename)
@@ -2414,7 +2437,7 @@ def download_apimart_image(url):
             ext = 'jpg'
         
         filename = f"apimart_{timestamp}_{os.urandom(4).hex().upper()}.{ext}"
-        filepath = os.path.join(OPENAI_SAVE_DIR, filename)
+        filepath = os.path.join(config.OPENAI_SAVE_DIR, filename)
         
         with open(filepath, 'wb') as f:
             f.write(response.content)
@@ -2646,7 +2669,7 @@ def process_url():
         return jsonify({"success": False, "message": str(e)}), 500
 
 
-def find_free_port(start_port=SERVER_PORT, max_try=100):
+def find_free_port(start_port=config.SERVER_PORT, max_try=100):
     """从 start_port 开始，找到第一个可用端口"""
     import socket
     for port in range(start_port, start_port + max_try):
@@ -2661,33 +2684,20 @@ def find_free_port(start_port=SERVER_PORT, max_try=100):
 
 def configure_job_provider_adapters():
     """Register generation providers for the unified Job System."""
-    from services.jobs.providers import APIMartAdapter, FlaskEndpointAdapter, OpenAITaskAdapter, SousakuAdapter
-
-    _JOB_WORKER.adapters = {
-        "sousaku": SousakuAdapter(),
-        "cliproxy": FlaskEndpointAdapter(
-            name="cliproxy",
-            app=app,
-            endpoint=generate_image_cliproxy,
-            path="/api/generate-cliproxy",
-        ),
-        "nanobanana2": FlaskEndpointAdapter(
-            name="nanobanana2",
-            app=app,
-            endpoint=generate_image_nanobanana2,
-            path="/api/generate-nanobanana2",
-        ),
-        "apimart": APIMartAdapter(
-            app=app,
-            submit_endpoint=generate_image,
-            status_endpoint=get_task_status,
-        ),
-        "openai": OpenAITaskAdapter(
-            app=app,
-            submit_endpoint=generate_image_openai_tasks,
-            status_endpoint=get_openai_tasks,
-        ),
-    }
+    config.apply_runtime_config()
+    _JOB_WORKER.adapters = provider_registry.build_job_adapters(
+        app=app,
+        endpoints={
+            "cliproxy": generate_image_cliproxy,
+            "nanobanana2": generate_image_nanobanana2,
+            "apimart_submit": generate_image,
+            "apimart_status": get_task_status,
+            "openai_submit": generate_image_openai_tasks,
+            "openai_status": get_openai_tasks,
+        },
+    )
+    _JOB_WORKER.provider_limits = config.JOB_PROVIDER_LIMITS
+    _JOB_WORKER.max_workers = max(1, int(config.JOB_WORKER_MAX_WORKERS or 1))
 
 
 def refresh_sousaku_accounts_async(reason: str) -> None:
@@ -2702,25 +2712,26 @@ def refresh_sousaku_accounts_async(reason: str) -> None:
 
 
 configure_job_provider_adapters()
+provider_registry.add_change_listener(configure_job_provider_adapters)
 
 
 if __name__ == '__main__':
     import json as _json
-    from config import BACKEND_USE_RELOADER, FRONTEND_PORT
+    
 
-    port = find_free_port(SERVER_PORT)
+    port = find_free_port(config.SERVER_PORT)
     is_reloader_child = os.environ.get("WERKZEUG_RUN_MAIN") == "true"
-    should_run_startup_side_effects = (not BACKEND_USE_RELOADER) or is_reloader_child
+    should_run_startup_side_effects = (not config.BACKEND_USE_RELOADER) or is_reloader_child
 
     if should_run_startup_side_effects:
         # 把实际端口写入 server_port.json，供前端自动读取
         _port_file = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'server_port.json')
         with open(_port_file, 'w') as _f:
-            _json.dump({"port": port, "frontend_port": FRONTEND_PORT}, _f)
+            _json.dump({"port": port, "frontend_port": config.FRONTEND_PORT}, _f)
 
-        log_event("STARTUP", "后端启动", "OK", port=port, frontend_port=FRONTEND_PORT, port_file=_port_file, reload=BACKEND_USE_RELOADER)
-        if port != SERVER_PORT:
-            log_event("STARTUP", "端口被占用，已切换", "WARN", default=SERVER_PORT, actual=port)
+        log_event("STARTUP", "后端启动", "OK", port=port, frontend_port=config.FRONTEND_PORT, port_file=_port_file, reload=config.BACKEND_USE_RELOADER)
+        if port != config.SERVER_PORT:
+            log_event("STARTUP", "端口被占用，已切换", "WARN", default=config.SERVER_PORT, actual=port)
         interrupted_jobs = _JOB_STORE.mark_interrupted_jobs()
         if interrupted_jobs:
             log_event("JOB", "已清理上次中断任务", "WARN", count=interrupted_jobs)
@@ -2748,5 +2759,5 @@ if __name__ == '__main__':
         log_event("STARTUP", "接口", method="POST", path="/api/open-folder", name="打开目录")
         log_event("STARTUP", "接口", method="POST", path="/api/gallery/import", name="导入画廊")
         log_event("STARTUP", "接口", method="GET", path="/api/capabilities", name="能力探测")
-    app.run(debug=True, port=port, threaded=True, use_reloader=BACKEND_USE_RELOADER)
+    app.run(debug=True, port=port, threaded=True, use_reloader=config.BACKEND_USE_RELOADER)
 

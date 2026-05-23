@@ -10,12 +10,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request, send_file
 from PIL import Image, ImageOps
 
-from config import (
-    GALLERY_THUMBNAIL_CACHE_MAX_GB,
-    GALLERY_THUMBNAIL_QUALITY,
-    GALLERY_THUMBNAIL_WIDTH,
-    OPENAI_SAVE_DIR,
-)
+import config
 from services.image_files import guess_mimetype, resolve_allowed_path
 
 
@@ -50,8 +45,8 @@ def serve_thumbnail():
         if not source_path or not source_path.exists():
             return jsonify({"error": "File not found"}), 404
 
-        width = _clamp_int(request.args.get("w"), default=GALLERY_THUMBNAIL_WIDTH, minimum=128, maximum=1536)
-        quality = _clamp_int(request.args.get("q"), default=GALLERY_THUMBNAIL_QUALITY, minimum=45, maximum=92)
+        width = _clamp_int(request.args.get("w"), default=config.GALLERY_THUMBNAIL_WIDTH, minimum=128, maximum=1536)
+        quality = _clamp_int(request.args.get("q"), default=config.GALLERY_THUMBNAIL_QUALITY, minimum=45, maximum=92)
         thumbnail_path = _thumbnail_path(source_path, width, quality)
 
         if not thumbnail_path.exists():
@@ -72,16 +67,52 @@ def _clamp_int(value, *, default: int, minimum: int, maximum: int) -> int:
 
 
 def _thumbnail_dir(width: int) -> Path:
-    path = Path(OPENAI_SAVE_DIR) / "thumbnails" / str(width)
+    path = Path(config.OPENAI_SAVE_DIR) / "thumbnails" / str(width)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def _thumbnail_path(source_path: Path, width: int, quality: int) -> Path:
+    name = _thumbnail_cache_name(source_path, width, quality)
+    return _thumbnail_dir(width) / name
+
+
+def _thumbnail_cache_name(source_path: Path, width: int, quality: int) -> str:
     stat = source_path.stat()
     key = f"{source_path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}|{width}|{quality}"
-    name = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32] + ".webp"
-    return _thumbnail_dir(width) / name
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32] + ".webp"
+
+
+def delete_thumbnail_cache_for_source(raw_path: str | os.PathLike[str] | None) -> int:
+    source_path = resolve_allowed_path(raw_path) if raw_path else None
+    if not source_path or not source_path.exists():
+        return 0
+
+    cache_root = Path(config.OPENAI_SAVE_DIR) / "thumbnails"
+    widths = {config.GALLERY_THUMBNAIL_WIDTH}
+    if cache_root.exists():
+        for path in cache_root.iterdir():
+            if not path.is_dir():
+                continue
+            try:
+                widths.add(int(path.name))
+            except ValueError:
+                continue
+
+    deleted = 0
+    for width in widths:
+        directory = cache_root / str(width)
+        if not directory.exists():
+            continue
+        for quality in range(45, 93):
+            candidate = directory / _thumbnail_cache_name(source_path, width, quality)
+            try:
+                if candidate.is_file():
+                    candidate.unlink()
+                    deleted += 1
+            except OSError:
+                continue
+    return deleted
 
 
 def _create_thumbnail(source_path: Path, thumbnail_path: Path, width: int, quality: int) -> None:
@@ -102,7 +133,7 @@ def _create_thumbnail(source_path: Path, thumbnail_path: Path, width: int, quali
 
 def _cleanup_thumbnail_cache() -> None:
     global _thumbnail_cleanup_at
-    max_bytes = int(float(GALLERY_THUMBNAIL_CACHE_MAX_GB or 0) * 1024 * 1024 * 1024)
+    max_bytes = int(float(config.GALLERY_THUMBNAIL_CACHE_MAX_GB or 0) * 1024 * 1024 * 1024)
     if max_bytes <= 0:
         return
 
@@ -111,7 +142,7 @@ def _cleanup_thumbnail_cache() -> None:
         return
     _thumbnail_cleanup_at = now
 
-    root = Path(OPENAI_SAVE_DIR) / "thumbnails"
+    root = Path(config.OPENAI_SAVE_DIR) / "thumbnails"
     if not root.exists():
         return
     files = [path for path in root.rglob("*.webp") if path.is_file()]

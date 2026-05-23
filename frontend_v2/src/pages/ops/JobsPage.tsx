@@ -1,6 +1,8 @@
 import { Copy, Eye, Search, Trash2 } from 'lucide-react';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { deleteGenerationJob, deleteGenerationJobs, listGenerationJobs, type GenerationJob } from '../../services/api';
+import { useProviders } from '../../hooks/useProviders';
+import { providerLabel } from '../../utils/providers';
 
 const statusLabels: Record<string, string> = {
     queued: '排队',
@@ -24,19 +26,6 @@ const statusClass: Record<string, string> = {
     timeout: 'bg-orange-500/15 text-orange-300 border-orange-500/30',
 };
 
-const providerLabels: Record<string, string> = {
-    openai: 'ChatGPT2API',
-    apimart: 'APIMart',
-    cliproxy: 'CLIProxy',
-    nanobanana2: 'Nanobanana2',
-    sousaku: 'Sousaku',
-};
-
-function providerLabel(provider: unknown) {
-    const value = String(provider || '');
-    return providerLabels[value.toLowerCase()] || value || '-';
-}
-
 function fmtTime(value?: string) {
     if (!value) return '-';
     return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
@@ -57,6 +46,15 @@ function requestedCount(job: GenerationJob) {
 
 function resultCount(job: GenerationJob) {
     return Array.isArray(job.result) ? job.result.length : 0;
+}
+
+function referenceCount(job: GenerationJob) {
+    if (Array.isArray(job.input_images)) {
+        return job.input_images.length;
+    }
+    const params = job.params || {};
+    const inline = params.image_urls || params.input_images;
+    return Array.isArray(inline) ? inline.length : 0;
 }
 
 function resultImageUrl(image: Record<string, unknown> | undefined) {
@@ -82,6 +80,7 @@ export function JobsPage() {
     const pageRef = useRef<HTMLElement>(null);
     const listPanelRef = useRef<HTMLDivElement>(null);
     const detailRef = useRef<HTMLDivElement>(null);
+    const { providers } = useProviders();
 
     const hasActiveJobs = useMemo(
         () => jobs.some(isActiveJob),
@@ -124,10 +123,10 @@ export function JobsPage() {
     const filtered = useMemo(() => {
         return jobs.filter((job) => {
             if (status !== 'all' && job.status !== status) return false;
-            const text = `${job.id} ${job.provider} ${providerLabel(job.provider)} ${job.prompt} ${job.external_task_id || ''}`.toLowerCase();
+            const text = `${job.id} ${job.provider} ${providerLabel(job.provider, providers)} ${job.prompt} ${job.external_task_id || ''}`.toLowerCase();
             return !query || text.includes(query.toLowerCase());
         });
-    }, [jobs, query, status]);
+    }, [jobs, providers, query, status]);
 
     const totalPages = Math.max(1, Math.ceil(filtered.length / pageSize));
     const currentPage = Math.min(page, totalPages);
@@ -300,7 +299,7 @@ export function JobsPage() {
                                         <div className="font-mono text-xs text-[var(--text-muted)]">{job.id.slice(0, 12)}</div>
                                         <div className="truncate text-[var(--text-primary)]">{job.prompt || '无 Prompt'}</div>
                                     </td>
-                                    <td className="px-3 py-3 text-[var(--text-secondary)]">{providerLabel(job.provider)}</td>
+                                    <td className="px-3 py-3 text-[var(--text-secondary)]">{providerLabel(job.provider, providers)}</td>
                                     <td className="px-3 py-3">
                                         <span className={`inline-flex rounded-full border px-2 py-1 text-xs ${statusClass[job.status] || statusClass.queued}`}>
                                             {statusLabels[job.status] || job.status}
@@ -432,10 +431,11 @@ export function JobsPage() {
                             </section>
                             <section className="grid grid-cols-2 gap-2 text-sm">
                                 {[
-                                    ['渠道', providerLabel(selected.provider)],
+                                    ['渠道', providerLabel(selected.provider, providers)],
                                     ['模型', String(selected.params?.model || '-')],
                                     ['比例', String(selected.params?.size || selected.params?.ratio || '-')],
                                     ['数量', `${resultCount(selected)}/${requestedCount(selected)}`],
+                                    ['参考图', `${referenceCount(selected)} 张`],
                                     ['Provider任务ID', selected.external_task_id || '-'],
                                     ['失败原因', selected.error || '-'],
                                 ].map(([label, value]) => (

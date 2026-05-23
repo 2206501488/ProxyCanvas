@@ -133,6 +133,29 @@ body {
   box-shadow: var(--shadow-glow);
 }
 
+.proxy-color-picker {
+  width: 100% !important;
+  height: 168px !important;
+}
+
+.proxy-color-picker .react-colorful__saturation {
+  border-radius: 8px 8px 4px 4px;
+  border-bottom: none;
+}
+
+.proxy-color-picker .react-colorful__hue {
+  height: 14px;
+  margin-top: 10px;
+  border-radius: 999px;
+}
+
+.proxy-color-picker .react-colorful__pointer {
+  width: 18px;
+  height: 18px;
+  border: 2px solid white;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.42);
+}
+
 /* Animations */
 @keyframes fadeIn {
   from {

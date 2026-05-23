@@ -5,19 +5,12 @@ import { Check, ImagePlus, Loader2, Upload, X } from 'lucide-react';
 import { importGalleryImages, importPickedLocalGalleryFiles, pickLocalGalleryFiles } from '../../services/api';
 import { useStore } from '../../store';
 import type { ImageItem } from '../../types';
+import { useProviders } from '../../hooks/useProviders';
+import { importProviderOptions } from '../../utils/providers';
 
 interface ImportGalleryModalProps {
     onClose: () => void;
 }
-
-const API_OPTIONS: Array<{ label: string; value: ImageItem['apiType'] }> = [
-    { label: 'Other', value: 'other' },
-    { label: 'ChatGPT2API', value: 'openai' },
-    { label: 'APIMart', value: 'apimart' },
-    { label: 'Nanobanana2', value: 'nanobanana2' },
-    { label: 'CLIProxy', value: 'cliproxy' },
-    { label: 'Sousaku', value: 'sousaku' },
-];
 
 interface LocalFileHandle {
     getFile: () => Promise<File>;
@@ -48,6 +41,7 @@ export function ImportGalleryModal({ onClose }: ImportGalleryModalProps) {
     const addImportedImages = useStore((s) => s.addImportedImages);
     const deleteImportedOriginal = useStore((s) => s.deleteImportedOriginal);
     const backendCapabilities = useStore((s) => s.backendCapabilities);
+    const { providers } = useProviders();
     const inputRef = useRef<HTMLInputElement>(null);
     const backdropPressRef = useRef<{ started: boolean; x: number; y: number }>({ started: false, x: 0, y: 0 });
     const [entries, setEntries] = useState<LocalFileEntry[]>([]);
@@ -59,6 +53,7 @@ export function ImportGalleryModal({ onClose }: ImportGalleryModalProps) {
     const [importedCount, setImportedCount] = useState(0);
     const [deletedOriginalCount, setDeletedOriginalCount] = useState(0);
     const [deleteOriginalSkippedCount, setDeleteOriginalSkippedCount] = useState(0);
+    const apiOptions = useMemo(() => importProviderOptions(providers), [providers]);
 
     const previews = useMemo(
         () => entries.map((entry) => ({
@@ -320,7 +315,7 @@ export function ImportGalleryModal({ onClose }: ImportGalleryModalProps) {
                                 onChange={(e) => setApiType(e.target.value as ImageItem['apiType'])}
                                 className="w-full px-3 py-2 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-sm text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
                             >
-                                {API_OPTIONS.map((option) => (
+                                {apiOptions.map((option) => (
                                     <option key={option.value} value={option.value}>{option.label}</option>
                                 ))}
                             </select>

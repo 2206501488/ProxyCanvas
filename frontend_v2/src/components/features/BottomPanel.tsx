@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo } from 'react';
+import { useState, useRef, useMemo, useEffect } from 'react';
 import { Send, Image as ImageIcon, Settings, Loader2, X, Plus, Check, Paintbrush } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useStore, useGenerateParams } from '../../store';
@@ -6,26 +6,114 @@ import {
     fileToBase64,
     uploadImage,
 } from '../../services/api';
+import type { RuntimeProvider } from '../../services/api';
 import { startGeneration } from '../../services/generationService';
-import type { ImageItem, UploadedImage } from '../../types';
+import type { GenerateParams, ImageItem, UploadedImage } from '../../types';
 import { isMaskSupported } from '../../types';
 import { MaskEditor } from './MaskEditor';
+import { useProviders } from '../../hooks/useProviders';
+import { generationProviderOptions, isBuiltinApi } from '../../utils/providers';
 
-function normalizeSousakuModel(model: string) {
-    const aliases: Record<string, string> = {
-        low: 'gpt-image-2-low',
-        medium: 'gpt-image-2',
-        high: 'gpt-image-2-high',
-        'gpt-image-2-4k': 'gpt-image-2',
-        'gpt-image-2-medium': 'gpt-image-2',
-        'gpt-image-2-high-4k': 'gpt-image-2-high',
-    };
-    return aliases[model] || model;
+type ModelOption = {
+    value: string;
+    label?: string;
+    defaults?: Partial<GenerateParams>;
+    controls?: ModelControl[];
+    constraints?: ModelConstraints;
+    features?: Record<string, unknown>;
+    payload?: Record<string, unknown>;
+};
+
+type ControlOption = string | number | boolean | { value: string | number | boolean; label?: string };
+type ModelControl = {
+    key: keyof GenerateParams;
+    label?: string;
+    type?: 'select' | 'boolean' | 'number';
+    options?: ControlOption[];
+    min?: number;
+    max?: number;
+    step?: number;
+};
+type ModelConstraints = {
+    fixedImageCount?: number;
+    resolutionByRatio?: Record<string, string[]>;
+};
+
+const FALLBACK_CLIPROXY_MODELS: ModelOption[] = [
+    { value: 'gpt-image-2', label: 'GPT-Image-2' },
+    { value: 'gemini-3.1-flash-image', label: 'Gemini 3.1 Flash Image' },
+];
+
+const FALLBACK_SOUSAKU_MODELS: ModelOption[] = [
+    { value: 'gpt-image-2-low', label: 'GPT Image 2.0 Low' },
+    { value: 'gpt-image-2', label: 'GPT Image 2.0 Medium' },
+    { value: 'gpt-image-2-high', label: 'GPT Image 2.0 High' },
+    { value: 'wan-image-2.7-pro', label: 'WAN Image 2.7 Pro' },
+    { value: 'mj-image-v7', label: 'Midjourney V7' },
+    { value: 'mj-image-niji-7', label: 'Midjourney Niji 7' },
+];
+
+const FALLBACK_APIMART_MODELS: ModelOption[] = [
+    { value: 'gemini-3-pro-image-preview', label: 'Gemini 3 Pro' },
+    { value: 'gemini-3.1-flash-image-preview', label: 'Gemini 3.1 Flash' },
+    { value: 'gpt-image-2', label: 'GPT-Image-2' },
+    { value: 'gpt-image-2-official', label: 'GPT-Image-2 Official' },
+];
+
+function providerModelOptions(providers: RuntimeProvider[], providerId: string, fallback: ModelOption[]): ModelOption[] {
+    const configured = providers.find((provider) => provider.id === providerId)?.models || [];
+    const usable = configured
+        .filter((model) => model.value)
+        .map((model) => ({
+            ...model,
+            defaults: model.defaults as Partial<GenerateParams> | undefined,
+            controls: model.controls as ModelControl[] | undefined,
+            constraints: model.constraints as ModelConstraints | undefined,
+            features: model.features,
+            payload: model.payload,
+        }));
+    return usable.length > 0 ? usable : fallback;
+}
+
+function providerDefaultModel(providers: RuntimeProvider[], providerId: string, fallback: string) {
+    return providers.find((provider) => provider.id === providerId)?.defaultModel || fallback;
+}
+
+function modelParamKey(api: string): keyof GenerateParams {
+    if (api === 'apimart') return 'apimartModel';
+    if (api === 'cliproxy') return 'cliproxyModel';
+    if (api === 'sousaku') return 'sousakuModel';
+    return 'model';
+}
+
+function optionValue(option: ControlOption) {
+    return typeof option === 'object' ? option.value : option;
+}
+
+function optionLabel(option: ControlOption) {
+    if (typeof option === 'object') return option.label || String(option.value);
+    return String(option);
+}
+
+function parseControlValue(value: string, sample: ControlOption | undefined, control: ModelControl) {
+    const raw = sample ? optionValue(sample) : value;
+    if (typeof raw === 'number' || control.key === 'imageCount') return Number(value);
+    if (typeof raw === 'boolean' || control.type === 'boolean') return value === 'true';
+    return value;
+}
+
+function pixelSizeFor(model: ModelOption | undefined, ratio: string, resolution: string) {
+    const pixelMap = model?.payload?.pixelSizeMap;
+    if (!pixelMap || typeof pixelMap !== 'object') return undefined;
+    const byRatio = (pixelMap as Record<string, Record<string, string | null>>)[ratio];
+    return byRatio?.[resolution] || undefined;
 }
 
 export function BottomPanel() {
     const selectedApi = useStore((s) => s.selectedApi);
     const setSelectedApi = useStore((s) => s.setSelectedApi);
+    const selectedModelByApi = useStore((s) => s.selectedModelByApi);
+    const setSelectedModel = useStore((s) => s.setSelectedModel);
     const generateParams = useGenerateParams();
     const setGenerateParams = useStore((s) => s.setGenerateParams);
     const uploadedImages = useStore((s) => s.uploadedImages);
@@ -33,7 +121,8 @@ export function BottomPanel() {
     const removeUploadedImage = useStore((s) => s.removeUploadedImage);
     const currentPrompt = useStore((s) => s.currentPrompt);
     const setCurrentPrompt = useStore((s) => s.setCurrentPrompt);
-    const addImage = useStore((s) => s.addImage);
+    const autoClearPrompt = useStore((s) => s.autoClearPrompt);
+    const addImagesLocal = useStore((s) => s.addImagesLocal);
     const updateImage = useStore((s) => s.updateImage);
     const removeImage = useStore((s) => s.removeImage);
     const addThoughtImages = useStore((s) => s.addThoughtImages);
@@ -52,6 +141,29 @@ export function BottomPanel() {
     const [isDragging, setIsDragging] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const { providers } = useProviders();
+
+    const apiOptions = useMemo(() => {
+        return generationProviderOptions(providers);
+    }, [providers]);
+    const cliproxyModelOptions = useMemo(
+        () => providerModelOptions(providers, 'cliproxy', FALLBACK_CLIPROXY_MODELS),
+        [providers],
+    );
+    const sousakuModelOptions = useMemo(
+        () => providerModelOptions(providers, 'sousaku', FALLBACK_SOUSAKU_MODELS),
+        [providers],
+    );
+    const apimartModelOptions = useMemo(
+        () => providerModelOptions(providers, 'apimart', FALLBACK_APIMART_MODELS),
+        [providers],
+    );
+
+    useEffect(() => {
+        if (!apiOptions.some((option) => option.value === selectedApi)) {
+            setSelectedApi(apiOptions[0].value);
+        }
+    }, [apiOptions, selectedApi, setSelectedApi]);
 
     // Upload file to image hosting and get URL
     const handleFileUpload = async (files: FileList | null) => {
@@ -212,13 +324,10 @@ export function BottomPanel() {
 
         const prompt = currentPrompt;
         const params = { ...generateParams };
-        const selectedSousakuModel = normalizeSousakuModel(generateParams.sousakuModel || 'gpt-image-2');
-        const selectedSousakuHasFixedCount = ['mj-image-v7', 'mj-image-niji-7'].includes(selectedSousakuModel);
-        const imageCount = selectedApi === 'sousaku' && selectedSousakuHasFixedCount
-            ? 4
-            : (selectedApi === 'openai' || selectedApi === 'nanobanana2' || selectedApi === 'cliproxy' || selectedApi === 'sousaku') ? (generateParams.imageCount || 1) : 1;
-        if (selectedApi === 'sousaku' && selectedSousakuHasFixedCount) {
-            params.imageCount = 4;
+        const fixedImageCount = Number(selectedModelConfig?.constraints?.fixedImageCount || 0);
+        const imageCount = fixedImageCount || Number(generateParams.imageCount || selectedModelConfig?.defaults?.imageCount || 1);
+        if (fixedImageCount) {
+            params.imageCount = fixedImageCount;
         }
         if (selectedApi === 'openai') {
             params.ratio = generateParams.ratio || '16:9';
@@ -229,11 +338,12 @@ export function BottomPanel() {
 
         // 1. Create placeholder images immediately
         const placeholderIds: string[] = [];
+        const placeholders: ImageItem[] = [];
         for (let i = 0; i < imageCount; i++) {
             const placeholderId = crypto.randomUUID();
             placeholderIds.push(placeholderId);
 
-            const placeholder: ImageItem = {
+            placeholders.push({
                 id: placeholderId,
                 status: 'loading',
                 localPath: '',
@@ -244,9 +354,9 @@ export function BottomPanel() {
                 createdAt: new Date().toISOString(),
                 isFavorite: false,
                 tags: [],
-            };
-            addImage(placeholder);
+            });
         }
+        addImagesLocal(placeholders);
 
         // Collect mask data for selected images
         const firstMaskedId = selectedRefs.find(id => maskData[id]);
@@ -259,6 +369,7 @@ export function BottomPanel() {
                 prompt,
                 apiType,
                 params,
+                modelConfig: selectedModelConfig,
                 imageUrls: imageUrls.length > 0 ? imageUrls : undefined,
                 placeholderIds,
                 maskDataUrl: activeMaskData,
@@ -280,6 +391,9 @@ export function BottomPanel() {
                 },
             }
         );
+        if (autoClearPrompt) {
+            setCurrentPrompt('');
+        }
     };
 
     const ratioOptions = ['auto', '1:1', '1:2', '1:4', '1:8', '2:1', '2:3', '3:2', '3:4', '4:1', '4:3', '4:5', '5:4', '8:1', '9:16', '9:21', '16:9', '21:9'];
@@ -288,48 +402,181 @@ export function BottomPanel() {
         { value: 'medium', label: '2K' },
         { value: 'hd', label: '4K' },
     ];
-    const gptImageQualityOptions = ['auto', 'low', 'medium', 'high'];
-    const moderationOptions = ['auto', 'low'];
-    const resolutionOptions = ['1K', '2K', '4K'];
-    const sousakuModel = normalizeSousakuModel(generateParams.sousakuModel || 'gpt-image-2');
-    const sousakuModelSupportsResolution = ['gpt-image-2-low', 'gpt-image-2', 'gpt-image-2-high', 'wan-image-2.7-pro'].includes(sousakuModel);
-    const sousakuModelHasFixedCount = ['mj-image-v7', 'mj-image-niji-7'].includes(sousakuModel);
-    const sousakuResolutionDefault = '4k';
+    const openaiModelOptions = useMemo(
+        () => providerModelOptions(providers, 'openai', [{
+            value: 'gpt-image-2',
+            label: 'GPT-Image-2',
+            defaults: { ratio: '16:9', imageCount: 1 },
+            controls: [
+                { key: 'ratio', label: '比例', type: 'select', options: ratioOptions },
+                { key: 'imageCount', label: '数量', type: 'select', options: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] },
+            ],
+            features: { referenceImage: true, mask: true },
+        }]),
+        [providers],
+    );
+    const nanobanana2ModelOptions = useMemo(
+        () => providerModelOptions(providers, 'nanobanana2', [{
+            value: 'gemini-3.1-flash-image',
+            label: 'Gemini 3.1 Flash Image',
+            defaults: { ratio: '16:9', quality: 'hd', imageCount: 1, thinkingLevel: 'High' },
+            controls: [
+                { key: 'ratio', label: '比例', type: 'select', options: ratioOptions },
+                { key: 'quality', label: '画质', type: 'select', options: qualityOptions },
+                { key: 'imageCount', label: '数量', type: 'select', options: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10] },
+                { key: 'thinkingLevel', label: '思考', type: 'select', options: ['High', 'Minimal'] },
+            ],
+            features: { referenceImage: true, mask: true, thinking: true },
+        }]),
+        [providers],
+    );
+    const modelOptionsForSelectedApi = useMemo(() => {
+        if (selectedApi === 'openai') return openaiModelOptions;
+        if (selectedApi === 'cliproxy') return cliproxyModelOptions;
+        if (selectedApi === 'sousaku') return sousakuModelOptions;
+        if (selectedApi === 'nanobanana2') return nanobanana2ModelOptions;
+        return apimartModelOptions;
+    }, [apimartModelOptions, cliproxyModelOptions, nanobanana2ModelOptions, openaiModelOptions, selectedApi, sousakuModelOptions]);
+    const selectedModelKey = modelParamKey(selectedApi);
+    const selectedModelValue = String(
+        selectedModelByApi[selectedApi] ||
+        generateParams[selectedModelKey] ||
+        providerDefaultModel(providers, selectedApi, modelOptionsForSelectedApi[0]?.value || '') ||
+        modelOptionsForSelectedApi[0]?.value ||
+        '',
+    );
+    const selectedModelConfig = modelOptionsForSelectedApi.find((model) => model.value === selectedModelValue) || modelOptionsForSelectedApi[0];
+    const selectedModelControls = selectedModelConfig?.controls || [];
 
-    // CLIProxy: ratio + resolution -> pixel size mapping
-    const cliproxySizeMap: Record<string, Record<string, string | null>> = {
-        '1:1': { '1K': '1024x1024', '2K': '2048x2048', '4K': '2880x2880' },
-        '3:2': { '1K': '1536x1024', '2K': '2048x1360', '4K': '3504x2336' },
-        '2:3': { '1K': '1024x1536', '2K': '1360x2048', '4K': '2336x3504' },
-        '4:3': { '1K': '1024x768', '2K': '2048x1536', '4K': '3264x2448' },
-        '3:4': { '1K': '768x1024', '2K': '1536x2048', '4K': '2448x3264' },
-        '5:4': { '1K': '1280x1024', '2K': '2560x2048', '4K': '3200x2560' },
-        '4:5': { '1K': '1024x1280', '2K': '2048x2560', '4K': '2560x3200' },
-        '16:9': { '1K': '1536x864', '2K': '2048x1152', '4K': '3840x2160' },
-        '9:16': { '1K': '864x1536', '2K': '1152x2048', '4K': '2160x3840' },
-        '2:1': { '1K': '2048x1024', '2K': '2688x1344', '4K': '3840x1920' },
-        '1:2': { '1K': '1024x2048', '2K': '1344x2688', '4K': '1920x3840' },
-        '21:9': { '1K': '2016x864', '2K': '2688x1152', '4K': '3840x1648' },
-        '9:21': { '1K': '864x2016', '2K': '1152x2688', '4K': '1648x3840' },
+    const handleModelChange = (nextModelValue: string) => {
+        setSelectedModel(nextModelValue);
     };
-    const cliproxyRatioOptions = Object.keys(cliproxySizeMap);
-    // Which CLIProxy ratios support 4K
-    const cliproxy4kRatios = cliproxyRatioOptions.filter(r => cliproxySizeMap[r]['4K'] !== null);
 
-    // APIMart gpt-image-2: all supported ratios, but 4K only supports these 6
-    const apimart4kOnlyRatios = ['16:9', '9:16', '2:1', '1:2', '21:9', '9:21'];
+    const isControlOptionDisabled = (control: ModelControl, value: string) => {
+        const resolutionByRatio = selectedModelConfig?.constraints?.resolutionByRatio;
+        if (!resolutionByRatio) return false;
+        if (control.key === 'resolution') {
+            const ratio = String(generateParams.ratio || selectedModelConfig?.defaults?.ratio || '16:9');
+            const allowedRatios = resolutionByRatio[value];
+            return Boolean(allowedRatios && ratio !== 'auto' && !allowedRatios.includes(ratio));
+        }
+        if (control.key === 'ratio') {
+            const resolution = String(generateParams.resolution || selectedModelConfig?.defaults?.resolution || '');
+            const allowedRatios = resolutionByRatio[resolution];
+            return Boolean(allowedRatios && value !== 'auto' && !allowedRatios.includes(value));
+        }
+        return false;
+    };
+
+    const handleControlChange = (control: ModelControl, rawValue: string, sample?: ControlOption) => {
+        const nextValue = parseControlValue(rawValue, sample, control);
+        const updates: Partial<GenerateParams> = { [control.key]: nextValue };
+        const resolutionByRatio = selectedModelConfig?.constraints?.resolutionByRatio;
+        if (control.key === 'ratio' && resolutionByRatio) {
+            const currentResolution = String(generateParams.resolution || selectedModelConfig?.defaults?.resolution || '');
+            const allowedRatios = resolutionByRatio[currentResolution];
+            if (allowedRatios && rawValue !== 'auto' && !allowedRatios.includes(rawValue)) {
+                updates.resolution = '2K';
+            }
+        }
+        setGenerateParams(updates);
+    };
+
+    const renderControl = (control: ModelControl) => {
+        const label = control.label || String(control.key);
+        const fixedImageCount = Number(selectedModelConfig?.constraints?.fixedImageCount || 0);
+        const controlValue = control.key === 'imageCount' && fixedImageCount
+            ? fixedImageCount
+            : generateParams[control.key] ?? selectedModelConfig?.defaults?.[control.key] ?? '';
+        if (control.type === 'boolean') {
+            return (
+                <div key={String(control.key)} className="flex items-center gap-2">
+                    <span className="text-xs text-[var(--text-muted)]">{label}:</span>
+                    <select
+                        value={controlValue ? 'true' : 'false'}
+                        onChange={(e) => handleControlChange(control, e.target.value)}
+                        className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
+                    >
+                        <option value="true">开启</option>
+                        <option value="false">关闭</option>
+                    </select>
+                </div>
+            );
+        }
+        if (control.type === 'number') {
+            return (
+                <label key={String(control.key)} className="flex items-center gap-2">
+                    <span className="text-xs text-[var(--text-muted)]">{label}:</span>
+                    <input
+                        type="number"
+                        min={control.min}
+                        max={control.max}
+                        step={control.step || 1}
+                        value={String(controlValue)}
+                        onChange={(e) => handleControlChange(control, e.target.value)}
+                        className="w-20 px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
+                    />
+                </label>
+            );
+        }
+        const options = control.options || [];
+        return (
+            <div key={String(control.key)} className="flex items-center gap-2">
+                <span className="text-xs text-[var(--text-muted)]">{label}:</span>
+                <select
+                    value={String(controlValue)}
+                    onChange={(e) => {
+                        const sample = options.find((option) => String(optionValue(option)) === e.target.value);
+                        handleControlChange(control, e.target.value, sample);
+                    }}
+                    className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
+                >
+                    {options.map((option) => {
+                        const value = String(optionValue(option));
+                        const disabled = isControlOptionDisabled(control, value);
+                        const pixelSize = control.key === 'resolution'
+                            ? pixelSizeFor(selectedModelConfig, String(generateParams.ratio || selectedModelConfig?.defaults?.ratio || '16:9'), value)
+                            : undefined;
+                        return (
+                            <option key={value} value={value} disabled={disabled}>
+                                {optionLabel(option)}{disabled ? ' (不可用)' : ''}{pixelSize ? ` (${pixelSize})` : ''}
+                            </option>
+                        );
+                    })}
+                </select>
+            </div>
+        );
+    };
+
+    const configuredControls = (
+        <>
+            {modelOptionsForSelectedApi.length > 1 && (
+                <div className="flex items-center gap-2">
+                    <span className="text-xs text-[var(--text-muted)]">模型:</span>
+                    <select
+                        value={selectedModelValue}
+                        onChange={(e) => handleModelChange(e.target.value)}
+                        className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
+                    >
+                        {modelOptionsForSelectedApi.map((model) => (
+                            <option key={model.value} value={model.value}>{model.label || model.value}</option>
+                        ))}
+                    </select>
+                </div>
+            )}
+            {selectedModelControls.map(renderControl)}
+        </>
+    );
 
     const selectedCount = selectedRefs.length;
 
     // Check if current API+model supports mask editing
-    const currentModel = selectedApi === 'cliproxy'
-        ? (generateParams.cliproxyModel || 'gpt-image-2')
-        : selectedApi === 'apimart'
-            ? (generateParams.apimartModel || 'gemini-3-pro-image-preview')
-            : undefined;
+    const currentModel = selectedModelValue;
     const maskSupported = useMemo(
-        () => isMaskSupported(selectedApi, currentModel),
-        [selectedApi, currentModel]
+        () => typeof selectedModelConfig?.features?.mask === 'boolean'
+            ? Boolean(selectedModelConfig.features.mask)
+            : isMaskSupported(selectedApi, currentModel),
+        [currentModel, selectedApi, selectedModelConfig]
     );
 
     return (
@@ -368,334 +615,21 @@ export function BottomPanel() {
                                     <span className="text-xs text-[var(--text-muted)]">API:</span>
                                     <select
                                         value={selectedApi}
-                                        onChange={(e) => setSelectedApi(e.target.value as 'apimart' | 'openai' | 'nanobanana2' | 'cliproxy' | 'sousaku')}
+                                        onChange={(e) => {
+                                            const api = e.target.value;
+                                            if (isBuiltinApi(api)) setSelectedApi(api);
+                                        }}
                                         className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
                                     >
-                                        <option value="openai">ChatGPT2API</option>
-                                        <option value="cliproxy">CLIProxy</option>
-                                        <option value="sousaku">Sousaku</option>
-                                        <option value="nanobanana2">Nanobanana2</option>
-                                        <option value="apimart">APIMart</option>
+                                        {apiOptions.map((option) => (
+                                            <option key={option.value} value={option.value}>
+                                                {option.label}
+                                            </option>
+                                        ))}
                                     </select>
                                 </div>
 
-                                {selectedApi === 'openai' ? (
-                                    <>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">比例:</span>
-                                            <select
-                                                value={generateParams.ratio || '16:9'}
-                                                onChange={(e) => setGenerateParams({ ratio: e.target.value })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {ratioOptions.map((ratio) => (
-                                                    <option key={ratio} value={ratio}>{ratio}</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">数量:</span>
-                                            <select
-                                                value={generateParams.imageCount || 1}
-                                                onChange={(e) => setGenerateParams({ imageCount: parseInt(e.target.value) })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
-                                                    <option key={n} value={n}>{n}张</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                    </>
-                                ) : selectedApi === 'cliproxy' ? (
-                                    <>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">模型:</span>
-                                            <select
-                                                value={generateParams.cliproxyModel || 'gpt-image-2'}
-                                                onChange={(e) => setGenerateParams({ cliproxyModel: e.target.value })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                <option value="gpt-image-2">GPT-Image-2</option>
-                                                <option value="gemini-3.1-flash-image">Gemini 3.1 Flash Image</option>
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">比例:</span>
-                                            <select
-                                                value={generateParams.ratio || '16:9'}
-                                                onChange={(e) => {
-                                                    const newRatio = e.target.value;
-                                                    // If current resolution is 4K but new ratio doesn't support it, downgrade to 2K
-                                                    if (generateParams.resolution === '4K' && !cliproxy4kRatios.includes(newRatio)) {
-                                                        setGenerateParams({ ratio: newRatio, resolution: '2K' });
-                                                    } else {
-                                                        setGenerateParams({ ratio: newRatio });
-                                                    }
-                                                }}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {cliproxyRatioOptions.map((ratio) => (
-                                                    <option key={ratio} value={ratio}>{ratio}</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">分辨率:</span>
-                                            <select
-                                                value={generateParams.resolution || '2K'}
-                                                onChange={(e) => setGenerateParams({ resolution: e.target.value })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {resolutionOptions.map((res) => {
-                                                    const curRatio = generateParams.ratio || '16:9';
-                                                    const disabled = res === '4K' && !cliproxy4kRatios.includes(curRatio);
-                                                    return (
-                                                        <option key={res} value={res} disabled={disabled}>
-                                                            {res}{disabled ? ' (不可用)' : ''}
-                                                            {cliproxySizeMap[curRatio]?.[res] ? ` (${cliproxySizeMap[curRatio][res]})` : ''}
-                                                        </option>
-                                                    );
-                                                })}
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">画质:</span>
-                                            <select
-                                                value={generateParams.quality}
-                                                onChange={(e) => setGenerateParams({ quality: e.target.value })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                <option value="low">Low</option>
-                                                <option value="medium">Medium</option>
-                                                <option value="high">High</option>
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">数量:</span>
-                                            <select
-                                                value={generateParams.imageCount || 1}
-                                                onChange={(e) => setGenerateParams({ imageCount: parseInt(e.target.value) })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
-                                                    <option key={n} value={n}>{n}张</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                    </>
-                                ) : selectedApi === 'sousaku' ? (
-                                    <>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">模型:</span>
-                                            <select
-                                                value={sousakuModel}
-                                                onChange={(e) => {
-                                                    const nextModel = e.target.value;
-                                                    setGenerateParams({
-                                                        sousakuModel: nextModel,
-                                                        imageCount: ['mj-image-v7', 'mj-image-niji-7'].includes(nextModel) ? 4 : generateParams.imageCount,
-                                                    });
-                                                }}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                <option value="gpt-image-2-low">GPT Image 2.0 Low</option>
-                                                <option value="gpt-image-2">GPT Image 2.0 Medium</option>
-                                                <option value="gpt-image-2-high">GPT Image 2.0 High</option>
-                                                <option value="wan-image-2.7-pro">WAN Image 2.7 Pro</option>
-                                                <option value="mj-image-v7">Midjourney V7</option>
-                                                <option value="mj-image-niji-7">Midjourney Niji 7</option>
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">比例:</span>
-                                            <select
-                                                value={generateParams.ratio || '1:1'}
-                                                onChange={(e) => setGenerateParams({ ratio: e.target.value })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {ratioOptions.filter((ratio) => ratio !== 'auto').map((ratio) => (
-                                                    <option key={ratio} value={ratio}>{ratio}</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        {sousakuModelSupportsResolution && (
-                                            <div className="flex items-center gap-2">
-                                                <span className="text-xs text-[var(--text-muted)]">分辨率:</span>
-                                                <select
-                                                    value={generateParams.resolution || sousakuResolutionDefault}
-                                                    onChange={(e) => setGenerateParams({ resolution: e.target.value })}
-                                                    className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                                >
-                                                    <option value="2k">2K</option>
-                                                    <option value="4k">4K</option>
-                                                </select>
-                                            </div>
-                                        )}
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">自动优化:</span>
-                                            <select
-                                                value={generateParams.sousakuAutoOptimize ?? true ? 'true' : 'false'}
-                                                onChange={(e) => setGenerateParams({ sousakuAutoOptimize: e.target.value === 'true' })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                <option value="true">开启</option>
-                                                <option value="false">关闭</option>
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">数量:</span>
-                                            <select
-                                                value={sousakuModelHasFixedCount ? 4 : (generateParams.imageCount || 1)}
-                                                onChange={(e) => setGenerateParams({ imageCount: parseInt(e.target.value) })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {(sousakuModelHasFixedCount ? [4] : [1, 2, 3, 4]).map((n) => (
-                                                    <option key={n} value={n}>{n}张</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                    </>
-                                ) : selectedApi === 'nanobanana2' ? (
-                                    <>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">比例:</span>
-                                            <select
-                                                value={generateParams.ratio}
-                                                onChange={(e) => setGenerateParams({ ratio: e.target.value })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {ratioOptions.map((ratio) => (
-                                                    <option key={ratio} value={ratio}>{ratio}</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">画质:</span>
-                                            <select
-                                                value={generateParams.quality}
-                                                onChange={(e) => setGenerateParams({ quality: e.target.value })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {qualityOptions.map((opt) => (
-                                                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">数量:</span>
-                                            <select
-                                                value={generateParams.imageCount || 1}
-                                                onChange={(e) => setGenerateParams({ imageCount: parseInt(e.target.value) })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
-                                                    <option key={n} value={n}>{n}张</option>
-                                                ))}
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">思考:</span>
-                                            <select
-                                                value={generateParams.thinkingLevel || 'High'}
-                                                onChange={(e) => setGenerateParams({ thinkingLevel: e.target.value })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                <option value="High">High</option>
-                                                <option value="Minimal">Minimal</option>
-                                            </select>
-                                        </div>
-                                    </>
-                                ) : (
-                                    <>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">模型:</span>
-                                            <select
-                                                value={generateParams.apimartModel || 'gemini-3-pro-image-preview'}
-                                                onChange={(e) => setGenerateParams({ apimartModel: e.target.value })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                <option value="gemini-3-pro-image-preview">Gemini 3 Pro</option>
-                                                <option value="gemini-3.1-flash-image-preview">Gemini 3.1 Flash</option>
-                                                <option value="gpt-image-2">GPT-Image-2</option>
-                                                <option value="gpt-image-2-official">GPT-Image-2 Official</option>
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">比例:</span>
-                                            <select
-                                                value={generateParams.ratio}
-                                                onChange={(e) => {
-                                                    const newRatio = e.target.value;
-                                                    // APIMart gpt-image-2: if 4K and ratio not in allowed list, downgrade
-                                                    const isGptImage2 = (generateParams.apimartModel || '').startsWith('gpt-image-2');
-                                                    if (isGptImage2 && generateParams.resolution === '4K' && !apimart4kOnlyRatios.includes(newRatio)) {
-                                                        setGenerateParams({ ratio: newRatio, resolution: '2K' });
-                                                    } else {
-                                                        setGenerateParams({ ratio: newRatio });
-                                                    }
-                                                }}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {ratioOptions.map((ratio) => {
-                                                    const isGptImage2 = (generateParams.apimartModel || '').startsWith('gpt-image-2');
-                                                    const blocked4k = isGptImage2 && generateParams.resolution === '4K' && !apimart4kOnlyRatios.includes(ratio) && ratio !== 'auto';
-                                                    return (
-                                                        <option key={ratio} value={ratio} disabled={blocked4k}>
-                                                            {ratio}{blocked4k ? ' (4K不可用)' : ''}
-                                                        </option>
-                                                    );
-                                                })}
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center gap-2">
-                                            <span className="text-xs text-[var(--text-muted)]">分辨率:</span>
-                                            <select
-                                                value={generateParams.resolution}
-                                                onChange={(e) => setGenerateParams({ resolution: e.target.value })}
-                                                className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                            >
-                                                {resolutionOptions.map((res) => {
-                                                    const isGptImage2 = (generateParams.apimartModel || '').startsWith('gpt-image-2');
-                                                    const curRatio = generateParams.ratio || '16:9';
-                                                    const disabled = isGptImage2 && res === '4K' && !apimart4kOnlyRatios.includes(curRatio) && curRatio !== 'auto';
-                                                    return (
-                                                        <option key={res} value={res} disabled={disabled}>
-                                                            {res}{disabled ? ' (当前比例不可用)' : ''}
-                                                        </option>
-                                                    );
-                                                })}
-                                            </select>
-                                        </div>
-                                        {generateParams.apimartModel === 'gpt-image-2-official' && (
-                                            <>
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-xs text-[var(--text-muted)]">Quality:</span>
-                                                    <select
-                                                        value={generateParams.quality || 'high'}
-                                                        onChange={(e) => setGenerateParams({ quality: e.target.value })}
-                                                        className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                                    >
-                                                        {gptImageQualityOptions.map((quality) => (
-                                                            <option key={quality} value={quality}>{quality}</option>
-                                                        ))}
-                                                    </select>
-                                                </div>
-                                                <div className="flex items-center gap-2">
-                                                    <span className="text-xs text-[var(--text-muted)]">Moderation:</span>
-                                                    <select
-                                                        value={generateParams.moderation || 'low'}
-                                                        onChange={(e) => setGenerateParams({ moderation: e.target.value })}
-                                                        className="px-2 py-1 rounded-lg bg-[var(--bg-secondary)] border border-[var(--border-subtle)] text-xs text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent-primary)]"
-                                                    >
-                                                        {moderationOptions.map((moderation) => (
-                                                            <option key={moderation} value={moderation}>{moderation}</option>
-                                                        ))}
-                                                    </select>
-                                                </div>
-                                            </>
-                                        )}
-                                    </>
-                                )}
+                                {configuredControls}
                             </div>
                         </motion.div>
                     )}

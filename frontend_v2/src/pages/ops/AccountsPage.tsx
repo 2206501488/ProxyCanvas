@@ -1,6 +1,8 @@
 import { Copy, Plus, RefreshCw, Search, ShieldCheck, ToggleLeft, ToggleRight, Trash2 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { addSousakuTokens, deleteSousakuAccount, listProviderAccounts, refreshSousakuAccount, updateSousakuAccount, type ProviderAccount } from '../../services/api';
+import { useProviders } from '../../hooks/useProviders';
+import { providerLabel } from '../../utils/providers';
 
 const statusLabel: Record<string, string> = {
     available: '可用',
@@ -47,6 +49,7 @@ export function AccountsPage() {
     const [refreshing, setRefreshing] = useState(false);
     const [adding, setAdding] = useState(false);
     const [refreshingAccountId, setRefreshingAccountId] = useState<string | null>(null);
+    const { providers: runtimeProviders } = useProviders();
 
     const load = async (options?: { refresh?: boolean }) => {
         if (options?.refresh) setRefreshing(true);
@@ -183,7 +186,7 @@ export function AccountsPage() {
                             onClick={() => setProvider(item)}
                             className={`rounded-full px-3 py-1.5 text-sm capitalize transition-colors ${provider === item ? 'bg-[var(--accent-primary)] text-white' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
                         >
-                            {item === 'nanobanana2' ? 'Nano' : item}
+                            {providerLabel(item, runtimeProviders)}
                         </button>
                     ))}
                 </div>

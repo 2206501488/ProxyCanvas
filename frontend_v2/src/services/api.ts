@@ -250,6 +250,188 @@ export async function deleteSousakuAccount(accountId: string): Promise<{
     return response.data;
 }
 
+export interface SettingValue<T> {
+    value: T;
+    source: string;
+    resolved?: string;
+}
+
+export interface BackendSettings {
+    ui: {
+        prompt: {
+            autoClear: SettingValue<boolean>;
+        };
+        gallery: {
+            columns: SettingValue<number>;
+            displayMode: SettingValue<'waterfall' | 'pagination'>;
+            pageSize: SettingValue<number>;
+            deleteLocalFile: SettingValue<boolean>;
+            deleteImportedOriginal: SettingValue<boolean>;
+            selectionColor: SettingValue<string>;
+            selectionBoxColor: SettingValue<string>;
+            tagColor: SettingValue<string>;
+        };
+    };
+    paths: {
+        projectRoot: SettingValue<string>;
+        saveDir: SettingValue<string>;
+        jobsDb: SettingValue<string>;
+        galleryDb: SettingValue<string>;
+    };
+    server: {
+        backendPort: SettingValue<number>;
+        frontendPort: SettingValue<number>;
+        useReloader: SettingValue<boolean>;
+    };
+    gallery: {
+        thumbnailWidth: SettingValue<number>;
+        thumbnailQuality: SettingValue<number>;
+        thumbnailCacheMaxGb: SettingValue<number>;
+    };
+    jobs: {
+        workerEnabled: SettingValue<boolean>;
+        maxWorkers: SettingValue<number>;
+        pollIntervalSeconds: SettingValue<number>;
+        defaultTimeoutSeconds: SettingValue<number>;
+        providerLimits: SettingValue<Record<string, number>>;
+    };
+    network: {
+        httpProxies: SettingValue<Record<string, string> | null>;
+    };
+    configFiles: Record<string, { path: string; exists: boolean }>;
+}
+
+export interface RuntimeProvider {
+    id: string;
+    label: string;
+    type: string;
+    enabled: boolean;
+    source: string;
+    baseUrl: string;
+    apiKey: string;
+    defaultModel: string;
+    models: Array<{
+        value: string;
+        label?: string;
+        defaults?: Record<string, unknown>;
+        controls?: Array<{
+            key: string;
+            label?: string;
+            type?: 'select' | 'boolean' | 'number';
+            options?: Array<string | number | boolean | { value: string | number | boolean; label?: string }>;
+            min?: number;
+            max?: number;
+            step?: number;
+        }>;
+        constraints?: Record<string, unknown>;
+        features?: Record<string, unknown>;
+        payload?: Record<string, unknown>;
+    }>;
+    capabilities: string[];
+    notes?: string;
+    configPath?: string;
+    builtin?: boolean;
+}
+
+export async function loadBackendSettings(): Promise<BackendSettings> {
+    const response = await api.get<{ success: boolean; data: BackendSettings }>('/settings', {
+        timeout: 30000,
+    });
+    if (!response.data.success) {
+        throw new Error('Failed to load settings');
+    }
+    return response.data.data;
+}
+
+export interface AppSettingsPatch {
+    server?: {
+        backendPort?: number;
+        frontendPort?: number;
+        useReloader?: boolean;
+    };
+    storage?: {
+        saveDir?: string;
+    };
+    ui?: {
+        prompt?: {
+            autoClear?: boolean;
+        };
+        gallery?: {
+            columns?: number;
+            displayMode?: 'waterfall' | 'pagination';
+            pageSize?: number;
+            deleteLocalFile?: boolean;
+            deleteImportedOriginal?: boolean;
+            selectionColor?: string;
+            selectionBoxColor?: string;
+            tagColor?: string;
+        };
+    };
+    gallery?: {
+        thumbnailWidth?: number;
+        thumbnailQuality?: number;
+        thumbnailCacheMaxGb?: number;
+    };
+    jobs?: {
+        workerEnabled?: boolean;
+        maxWorkers?: number;
+        pollIntervalSeconds?: number;
+        defaultTimeoutSeconds?: number;
+        providerLimits?: Record<string, number>;
+    };
+    network?: {
+        httpProxies?: Record<string, string> | null;
+    };
+}
+
+export async function saveBackendSettings(patch: AppSettingsPatch): Promise<AppSettingsPatch> {
+    const response = await api.patch<{ success: boolean; data: AppSettingsPatch }>('/settings', patch, {
+        timeout: 30000,
+    });
+    if (!response.data.success) {
+        throw new Error('Failed to save settings');
+    }
+    return response.data.data;
+}
+
+export async function resetBackendSettings(): Promise<AppSettingsPatch> {
+    const response = await api.post<{ success: boolean; data: AppSettingsPatch }>('/settings/reset', {}, {
+        timeout: 30000,
+    });
+    if (!response.data.success) {
+        throw new Error('Failed to reset settings');
+    }
+    return response.data.data;
+}
+
+export async function loadRuntimeProviders(): Promise<RuntimeProvider[]> {
+    const response = await api.get<{ success: boolean; data: RuntimeProvider[] }>('/providers', {
+        timeout: 30000,
+    });
+    if (!response.data.success) {
+        throw new Error('Failed to load providers');
+    }
+    return response.data.data;
+}
+
+export async function saveRuntimeProvider(providerId: string, patch: {
+    label?: string;
+    enabled?: boolean;
+    baseUrl?: string;
+    apiKey?: string;
+    defaultModel?: string;
+    configPath?: string;
+    notes?: string;
+}): Promise<RuntimeProvider> {
+    const response = await api.patch<{ success: boolean; data: RuntimeProvider }>(`/providers/${providerId}`, patch, {
+        timeout: 30000,
+    });
+    if (!response.data.success) {
+        throw new Error('Failed to save provider');
+    }
+    return response.data.data;
+}
+
 // Save a thought/draft image to local storage
 export async function saveThoughtImage(dataUri: string): Promise<{ saved_path: string; filename: string }> {
     const response = await api.post<{ success: boolean; saved_path: string; filename: string }>('/save-thought-image', { data_uri: dataUri });
@@ -508,8 +690,13 @@ export async function importPickedLocalGalleryFiles(options: Omit<ImportGalleryI
     };
 }
 
-export async function loadGallery(): Promise<GalleryData> {
-    const response = await api.get<{ success: boolean; data: GalleryData }>('/gallery');
+export async function loadGallery(options?: { limit?: number; offset?: number }): Promise<GalleryData> {
+    const response = await api.get<{ success: boolean; data: GalleryData }>('/gallery', {
+        params: {
+            limit: options?.limit,
+            offset: options?.offset,
+        },
+    });
     if (response.data.success) {
         return response.data.data;
     }
@@ -537,4 +724,56 @@ export async function deleteFromGallery(imageId: string, deleteLocal?: boolean):
 
 export async function updateGalleryTags(tags: string[]): Promise<void> {
     await api.post('/gallery/tags', { tags });
+}
+
+export async function batchDeleteGalleryImages(ids: string[], deleteLocal: boolean): Promise<{
+    deleted: number;
+    localDeleted: number;
+    localSkipped: number;
+}> {
+    const response = await api.post<{ success: boolean; data?: { deleted: number; localDeleted: number; localSkipped: number }; message?: string }>(
+        '/gallery/batch/delete',
+        { ids, deleteLocal },
+        { timeout: 120000 },
+    );
+    if (!response.data.success || !response.data.data) {
+        throw new Error(response.data.message || '批量删除失败');
+    }
+    return response.data.data;
+}
+
+export async function batchUpdateGalleryTags(ids: string[], options: { add?: string[]; remove?: string[] }): Promise<{ updated: number }> {
+    const response = await api.post<{ success: boolean; data?: { updated: number }; message?: string }>(
+        '/gallery/batch/tags',
+        { ids, add: options.add || [], remove: options.remove || [] },
+        { timeout: 120000 },
+    );
+    if (!response.data.success || !response.data.data) {
+        throw new Error(response.data.message || '批量标签更新失败');
+    }
+    return response.data.data;
+}
+
+export async function batchFavoriteGalleryImages(ids: string[], favorite: boolean): Promise<{ updated: number; favorite: boolean }> {
+    const response = await api.post<{ success: boolean; data?: { updated: number; favorite: boolean }; message?: string }>(
+        '/gallery/batch/favorite',
+        { ids, favorite },
+        { timeout: 120000 },
+    );
+    if (!response.data.success || !response.data.data) {
+        throw new Error(response.data.message || '批量收藏失败');
+    }
+    return response.data.data;
+}
+
+export async function batchExportGalleryImages(ids: string[]): Promise<{ exported: number; skipped: number; directory: string; cancelled?: boolean }> {
+    const response = await api.post<{ success: boolean; data?: { exported: number; skipped: number; directory: string; cancelled?: boolean }; message?: string }>(
+        '/gallery/batch/export',
+        { ids },
+        { timeout: 0 },
+    );
+    if (!response.data.success || !response.data.data) {
+        throw new Error(response.data.message || '导出失败');
+    }
+    return response.data.data;
 }

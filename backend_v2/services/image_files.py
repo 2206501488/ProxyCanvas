@@ -5,25 +5,80 @@ import os
 from pathlib import Path
 from urllib.parse import quote
 
-from config import CLIPROXY_SAVE_DIR, NANOBANANA2_SAVE_DIR, OPENAI_SAVE_DIR
+import config
 
 
 ALLOWED_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif"}
+_storage_base_cache: Path | None = None
+_storage_base_raw: str | None = None
 
 
 def allowed_roots() -> list[Path]:
-    roots = [OPENAI_SAVE_DIR, NANOBANANA2_SAVE_DIR, CLIPROXY_SAVE_DIR]
-    return [Path(root).resolve() for root in dict.fromkeys(roots)]
+    return [storage_base()]
 
 
-def resolve_allowed_path(raw_path: str | os.PathLike[str]) -> Path | None:
+def storage_base() -> Path:
+    global _storage_base_cache, _storage_base_raw
+
+    raw = str(config.OPENAI_SAVE_DIR)
+    if _storage_base_cache is None or _storage_base_raw != raw:
+        _storage_base_cache = Path(raw).resolve()
+        _storage_base_raw = raw
+    return _storage_base_cache
+
+
+def absolute_path_for_relative_path(relative_path: str | os.PathLike[str] | None) -> Path | None:
+    if relative_path is None:
+        return None
+    rel = Path(str(relative_path))
+    if rel.is_absolute() or rel.drive or rel.root or ".." in rel.parts:
+        return None
+    return storage_base() / rel
+
+
+def resolve_storage_path(relative_path: str | os.PathLike[str] | None) -> Path | None:
+    root = storage_base()
+    path = absolute_path_for_relative_path(relative_path)
+    if path is None:
+        return None
+    path = path.resolve()
+    try:
+        path.relative_to(root)
+        return path
+    except ValueError:
+        return None
+
+
+def path_to_relative_path(raw_path: str | os.PathLike[str] | None) -> str | None:
+    if not raw_path:
+        return None
     path = Path(raw_path).resolve()
-    for root in allowed_roots():
-        try:
-            path.relative_to(root)
-            return path
-        except ValueError:
-            continue
+    try:
+        return path.relative_to(storage_base()).as_posix()
+    except ValueError:
+        return None
+    return None
+
+
+def resolve_allowed_path(
+    raw_path: str | os.PathLike[str] | None = None,
+    *,
+    relative_path: str | os.PathLike[str] | None = None,
+) -> Path | None:
+    ref_path = resolve_storage_path(relative_path)
+    if ref_path is not None:
+        return ref_path
+    if raw_path is None:
+        return None
+    raw = Path(str(raw_path))
+    if not raw.is_absolute():
+        return resolve_storage_path(raw_path)
+    path = Path(raw_path).resolve()
+    try:
+        path.relative_to(storage_base())
+        return path
+    except ValueError:
+        pass
     return None
 
 
@@ -37,10 +92,13 @@ def guess_mimetype(path: str | os.PathLike[str]) -> str:
 
 
 def serve_url_for_path(path: str | os.PathLike[str]) -> str:
+    relative = path_to_relative_path(path)
+    if relative:
+        return f"/api/serve-image?path={quote(relative, safe='')}"
     return f"/api/serve-image?path={quote(str(path), safe='')}"
 
 
 def import_dir() -> Path:
-    path = Path(OPENAI_SAVE_DIR) / "imports"
+    path = Path(config.OPENAI_SAVE_DIR) / "imports"
     path.mkdir(parents=True, exist_ok=True)
     return path

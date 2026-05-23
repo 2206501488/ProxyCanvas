@@ -1,13 +1,18 @@
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Copy, Star, Plus, Folder, Loader2 } from 'lucide-react';
+import { X, Copy, Star, Plus, Folder, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useStore } from '../../store';
 import { format } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import React from 'react';
 import type { ImageItem } from '../../types';
 import axios from 'axios';
 import { TransformWrapper, TransformComponent, useControls } from 'react-zoom-pan-pinch';
+import { colorWithAlpha, normalizeHexColor } from '../../utils/color';
+import { useProviders } from '../../hooks/useProviders';
+import { providerBadgeClass, providerLabel } from '../../utils/providers';
+
+const FALLBACK_TAG_COLOR = '#f43f5e';
 
 function formatSousakuModel(model: string) {
     const labels: Record<string, string> = {
@@ -84,13 +89,45 @@ function QuickZoomButton({ currentScale }: { currentScale: number }) {
 interface ImageModalProps {
     image: ImageItem;
     onClose: () => void;
+    images?: ImageItem[];
+    onNavigate?: (image: ImageItem) => void;
 }
 
-export function ImageModal({ image: initialImage, onClose }: ImageModalProps) {
+function imageSrcForModal(image: ImageItem) {
+    if (image.thumbnail && !image.thumbnail.startsWith('data:')) {
+        return image.thumbnail;
+    }
+    if (image.relativePath) {
+        return `/api/serve-image?path=${encodeURIComponent(image.relativePath)}`;
+    }
+    if (image.savedFilePath) {
+        return `/api/serve-image?path=${encodeURIComponent(image.savedFilePath)}`;
+    }
+    if (image.localPath?.startsWith('/api/serve-image') || image.localPath?.startsWith('http')) {
+        return image.localPath;
+    }
+    if (image.localPath) {
+        return `/api/serve-image?path=${encodeURIComponent(image.localPath)}`;
+    }
+    return image.thumbnail || '';
+}
+
+function tagStyle(color: string) {
+    const safeColor = normalizeHexColor(color || FALLBACK_TAG_COLOR, FALLBACK_TAG_COLOR);
+    return {
+        backgroundColor: colorWithAlpha(safeColor, 0.16, FALLBACK_TAG_COLOR),
+        color: safeColor,
+        boxShadow: `inset 0 0 0 1px ${colorWithAlpha(safeColor, 0.28, FALLBACK_TAG_COLOR)}`,
+    };
+}
+
+export function ImageModal({ image: initialImage, onClose, images = [], onNavigate }: ImageModalProps) {
     const toggleFavorite = useStore((s) => s.toggleFavorite);
     const addTagToImage = useStore((s) => s.addTagToImage);
     const removeTagFromImage = useStore((s) => s.removeTagFromImage);
     const addTag = useStore((s) => s.addTag);
+    const galleryTagColor = useStore((s) => s.galleryTagColor);
+    const { providers } = useProviders();
     const [newTag, setNewTag] = useState('');
     const [showAddTag, setShowAddTag] = useState(false);
     const [copied, setCopied] = useState(false);
@@ -102,6 +139,15 @@ export function ImageModal({ image: initialImage, onClose }: ImageModalProps) {
 
     // Get current image from store to ensure we have latest state (including isFavorite)
     const image = useStore((s) => s.images.find(img => img.id === initialImage.id)) || initialImage;
+    const navigationImages = useMemo(() => images.filter((item) => item.status !== 'loading'), [images]);
+    const currentIndex = navigationImages.findIndex((item) => item.id === image.id);
+    const canNavigate = Boolean(onNavigate && navigationImages.length > 1 && currentIndex >= 0);
+    const previousImage = canNavigate
+        ? navigationImages[(currentIndex - 1 + navigationImages.length) % navigationImages.length]
+        : null;
+    const nextImage = canNavigate
+        ? navigationImages[(currentIndex + 1) % navigationImages.length]
+        : null;
     const actualSize = image.width && image.height
         ? `${image.width}x${image.height}`
         : naturalSize
@@ -110,13 +156,7 @@ export function ImageModal({ image: initialImage, onClose }: ImageModalProps) {
 
     // Build image URL - either use thumbnail URL, or use backend serve API
     const getImageSrc = () => {
-        if (image.thumbnail && !image.thumbnail.startsWith('data:')) {
-            return image.thumbnail;
-        }
-        if (image.localPath) {
-            return `/api/serve-image?path=${encodeURIComponent(image.localPath)}`;
-        }
-        return image.thumbnail || '';
+        return imageSrcForModal(image);
     };
 
     const copyPrompt = () => {
@@ -139,12 +179,13 @@ export function ImageModal({ image: initialImage, onClose }: ImageModalProps) {
     };
 
     const openFolder = async () => {
-        if (!image.savedFilePath) {
+        const filePath = image.savedFilePath || image.relativePath;
+        if (!filePath) {
             console.warn('No saved file path available');
             return;
         }
         try {
-            await axios.post('/api/open-folder', { path: image.savedFilePath });
+            await axios.post('/api/open-folder', { path: filePath });
         } catch (err) {
             console.error('Failed to open folder:', err);
         }
@@ -156,6 +197,43 @@ export function ImageModal({ image: initialImage, onClose }: ImageModalProps) {
         onClose();
     };
 
+    const navigateToImage = (target: ImageItem | null) => {
+        if (!target || !onNavigate) return;
+        setCurrentScale(1);
+        setNaturalSize(null);
+        onNavigate(target);
+    };
+
+    useEffect(() => {
+        const handler = (event: KeyboardEvent) => {
+            const target = event.target as HTMLElement | null;
+            const tagName = target?.tagName?.toLowerCase();
+            if (tagName === 'input' || tagName === 'textarea' || target?.isContentEditable) return;
+
+            if (event.key === 'ArrowLeft') {
+                event.preventDefault();
+                navigateToImage(previousImage);
+            } else if (event.key === 'ArrowRight') {
+                event.preventDefault();
+                navigateToImage(nextImage);
+            }
+        };
+
+        window.addEventListener('keydown', handler);
+        return () => window.removeEventListener('keydown', handler);
+    }, [nextImage, previousImage]);
+
+    useEffect(() => {
+        [previousImage, nextImage].forEach((item) => {
+            if (!item) return;
+            const src = imageSrcForModal(item);
+            if (!src) return;
+            const preload = new window.Image();
+            preload.decoding = 'async';
+            preload.src = src;
+        });
+    }, [nextImage, previousImage]);
+
     return (
         <AnimatePresence>
             <motion.div
@@ -164,7 +242,36 @@ export function ImageModal({ image: initialImage, onClose }: ImageModalProps) {
                 exit={{ opacity: 0 }}
                 className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm"
                 onClick={handleBackgroundClick}
-            >
+                >
+                    {canNavigate && (
+                        <>
+                            <button
+                                type="button"
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    navigateToImage(previousImage);
+                                }}
+                                className="absolute left-4 top-1/2 z-20 hidden h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-lg backdrop-blur-md transition-all hover:border-white/30 hover:bg-white/12 hover:text-white md:flex"
+                                aria-label="上一张"
+                                title="上一张"
+                            >
+                                <ChevronLeft className="h-7 w-7" />
+                            </button>
+                            <button
+                                type="button"
+                                onClick={(event) => {
+                                    event.stopPropagation();
+                                    navigateToImage(nextImage);
+                                }}
+                                className="absolute right-4 top-1/2 z-20 hidden h-12 w-12 -translate-y-1/2 items-center justify-center rounded-full border border-white/15 bg-black/45 text-white/80 shadow-lg backdrop-blur-md transition-all hover:border-white/30 hover:bg-white/12 hover:text-white md:flex"
+                                aria-label="下一张"
+                                title="下一张"
+                            >
+                                <ChevronRight className="h-7 w-7" />
+                            </button>
+                        </>
+                    )}
+
                 <motion.div
                     initial={{ scale: 0.95, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
@@ -184,6 +291,7 @@ export function ImageModal({ image: initialImage, onClose }: ImageModalProps) {
                             </div>
                         ) : (
                             <TransformWrapper
+                                key={image.id}
                                 initialScale={1}
                                 minScale={1}
                                 maxScale={8}
@@ -286,7 +394,8 @@ export function ImageModal({ image: initialImage, onClose }: ImageModalProps) {
                                 {image.tags.map((tag) => (
                                     <span
                                         key={tag}
-                                        className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs bg-[var(--accent-primary)]/20 text-[var(--accent-primary)]"
+                                        className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs"
+                                        style={tagStyle(galleryTagColor)}
                                     >
                                         {tag}
                                         <button
@@ -331,19 +440,8 @@ export function ImageModal({ image: initialImage, onClose }: ImageModalProps) {
                         <div className="space-y-2 text-sm">
                             <div className="flex justify-between">
                                 <span className="text-[var(--text-muted)]">API</span>
-                                <span className={`px-2 py-0.5 rounded text-xs ${image.apiType === 'other'
-                                    ? 'bg-yellow-500/20 text-yellow-400'
-                                    : image.apiType === 'openai'
-                                        ? 'bg-green-500/20 text-green-400'
-                                        : image.apiType === 'nanobanana2'
-                                            ? 'bg-purple-500/20 text-purple-400'
-                                            : image.apiType === 'cliproxy'
-                                                ? 'bg-red-500/20 text-red-400'
-                                                : image.apiType === 'sousaku'
-                                                    ? 'bg-cyan-500/20 text-cyan-400'
-                                                    : 'bg-blue-500/20 text-blue-400'
-                                    }`}>
-                                    {image.apiType === 'other' ? 'Other' : image.apiType === 'openai' ? 'ChatGPT2API' : image.apiType === 'nanobanana2' ? 'Nanobanana2' : image.apiType === 'cliproxy' ? 'CLIProxy' : image.apiType === 'sousaku' ? 'Sousaku' : 'APIMart'}
+                                <span className={`px-2 py-0.5 rounded text-xs ${providerBadgeClass(image.apiType)}`}>
+                                    {providerLabel(image.apiType, providers)}
                                 </span>
                             </div>
                             <div className="flex justify-between">
@@ -432,10 +530,10 @@ export function ImageModal({ image: initialImage, onClose }: ImageModalProps) {
                         </div>
 
                         {/* File path */}
-                        {image.savedFilePath && (
+                        {(image.savedFilePath || image.relativePath) && (
                             <div className="mt-auto pt-2 border-t border-[var(--border-subtle)]">
                                 <p className="text-xs text-[var(--text-muted)] break-all">
-                                    {image.savedFilePath}
+                                    {image.savedFilePath || image.relativePath}
                                 </p>
                             </div>
                         )}

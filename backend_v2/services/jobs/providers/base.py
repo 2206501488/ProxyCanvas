@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from services.jobs.store import JobStore
+from services.jobs.model_payload import translate_provider_payload
 
 
 class ProviderError(Exception):
@@ -24,6 +25,16 @@ class ProviderAdapter(ABC):
     def normalize_payload(self, job: dict[str, Any]) -> dict[str, Any]:
         params = dict(job.get("params") or {})
         params.setdefault("prompt", job.get("prompt") or "")
-        if job.get("input_images"):
-            params.setdefault("image_urls", job["input_images"])
-        return params
+        images = job.get("input_images")
+        if not images:
+            job_params = job.get("params") if isinstance(job.get("params"), dict) else {}
+            images = (
+                job_params.get("image_urls")
+                or job_params.get("imageUrls")
+                or job_params.get("input_images")
+                or job_params.get("inputImages")
+                or []
+            )
+        if images:
+            params.setdefault("image_urls", images)
+        return translate_provider_payload(str(job.get("provider") or self.name), params)

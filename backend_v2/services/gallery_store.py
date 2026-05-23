@@ -6,13 +6,13 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
-from config import GALLERY_DB_PATH, OPENAI_SAVE_DIR
+import config
+from services.image_files import absolute_path_for_relative_path, path_to_relative_path, resolve_allowed_path, serve_url_for_path
 
 
-GALLERY_FILE = Path(OPENAI_SAVE_DIR) / "gallery.json"
-GALLERY_DB = Path(GALLERY_DB_PATH)
+GALLERY_DB = Path(config.GALLERY_DB_PATH)
 _gallery_lock = threading.RLock()
 _initialized = False
 
@@ -22,6 +22,7 @@ KNOWN_IMAGE_KEYS = {
     "error",
     "localPath",
     "savedFilePath",
+    "relativePath",
     "thumbnail",
     "width",
     "height",
@@ -39,23 +40,36 @@ def _empty_gallery() -> dict[str, Any]:
     return {"images": [], "tags": []}
 
 
-def load_gallery() -> dict[str, Any]:
+def load_gallery(*, limit: int | None = None, offset: int = 0) -> dict[str, Any]:
     _ensure_ready()
     with _gallery_lock, _connect() as connection:
-        image_rows = connection.execute(
-            """
+        query = """
             SELECT *
             FROM gallery_images
             ORDER BY created_at DESC, id ASC
             """
+        params: list[Any] = []
+        if limit is not None:
+            query += " LIMIT ? OFFSET ?"
+            params.extend([limit, max(0, offset)])
+        image_rows = connection.execute(
+            query,
+            params,
         ).fetchall()
-        tag_rows = connection.execute(
-            """
-            SELECT image_id, tag
-            FROM gallery_image_tags
-            ORDER BY image_id ASC, tag ASC
-            """
-        ).fetchall()
+        image_ids = [row["id"] for row in image_rows]
+        if image_ids:
+            placeholders = ",".join("?" for _ in image_ids)
+            tag_rows = connection.execute(
+                f"""
+                SELECT image_id, tag
+                FROM gallery_image_tags
+                WHERE image_id IN ({placeholders})
+                ORDER BY image_id ASC, tag ASC
+                """,
+                image_ids,
+            ).fetchall()
+        else:
+            tag_rows = []
 
     tags_by_image: dict[str, list[str]] = {}
     all_tags: set[str] = set()
@@ -107,7 +121,7 @@ def delete_image(image_id: str) -> tuple[bool, str | None]:
     _ensure_ready()
     with _gallery_lock, _connect() as connection:
         row = connection.execute(
-            "SELECT saved_file_path, local_path FROM gallery_images WHERE id = ?",
+            "SELECT relative_path, saved_file_path, local_path FROM gallery_images WHERE id = ?",
             (image_id,),
         ).fetchone()
         if not row:
@@ -116,7 +130,113 @@ def delete_image(image_id: str) -> tuple[bool, str | None]:
         connection.execute("DELETE FROM gallery_image_tags WHERE image_id = ?", (image_id,))
         connection.execute("DELETE FROM gallery_images WHERE id = ?", (image_id,))
         connection.commit()
-        return True, row["saved_file_path"] or _path_from_serve_url(row["local_path"] or "")
+        return True, _row_file_path(row)
+
+
+def get_images_by_ids(image_ids: list[str]) -> list[dict[str, Any]]:
+    ids = _clean_id_list(image_ids)
+    if not ids:
+        return []
+
+    _ensure_ready()
+    placeholders = ",".join("?" for _ in ids)
+    with _gallery_lock, _connect() as connection:
+        image_rows = connection.execute(
+            f"""
+            SELECT *
+            FROM gallery_images
+            WHERE id IN ({placeholders})
+            """,
+            ids,
+        ).fetchall()
+        tag_rows = connection.execute(
+            f"""
+            SELECT image_id, tag
+            FROM gallery_image_tags
+            WHERE image_id IN ({placeholders})
+            ORDER BY image_id ASC, tag ASC
+            """,
+            ids,
+        ).fetchall()
+
+    tags_by_image: dict[str, list[str]] = {}
+    for row in tag_rows:
+        tags_by_image.setdefault(row["image_id"], []).append(row["tag"])
+
+    images_by_id = {row["id"]: _row_to_image(row, tags_by_image.get(row["id"], [])) for row in image_rows}
+    return [images_by_id[image_id] for image_id in ids if image_id in images_by_id]
+
+
+def delete_images(image_ids: list[str]) -> list[tuple[str, str | None]]:
+    ids = _clean_id_list(image_ids)
+    if not ids:
+        return []
+
+    deleted: list[tuple[str, str | None]] = []
+    _ensure_ready()
+    with _gallery_lock, _connect() as connection:
+        for image_id in ids:
+            row = connection.execute(
+                "SELECT relative_path, saved_file_path, local_path FROM gallery_images WHERE id = ?",
+                (image_id,),
+            ).fetchone()
+            if not row:
+                continue
+            deleted.append((image_id, _row_file_path(row)))
+            connection.execute("DELETE FROM gallery_image_tags WHERE image_id = ?", (image_id,))
+            connection.execute("DELETE FROM gallery_images WHERE id = ?", (image_id,))
+        connection.commit()
+    return deleted
+
+
+def update_image_tags(image_ids: list[str], *, add: list[str] | None = None, remove: list[str] | None = None) -> int:
+    ids = _clean_id_list(image_ids)
+    add_tags = _clean_tag_list(add or [])
+    remove_tags = _clean_tag_list(remove or [])
+    if not ids or (not add_tags and not remove_tags):
+        return 0
+
+    _ensure_ready()
+    touched = 0
+    timestamp = _now_iso()
+    with _gallery_lock, _connect() as connection:
+        for image_id in ids:
+            exists = connection.execute("SELECT 1 FROM gallery_images WHERE id = ?", (image_id,)).fetchone()
+            if not exists:
+                continue
+            for tag in add_tags:
+                connection.execute(
+                    "INSERT OR IGNORE INTO gallery_image_tags (image_id, tag) VALUES (?, ?)",
+                    (image_id, tag),
+                )
+            for tag in remove_tags:
+                connection.execute(
+                    "DELETE FROM gallery_image_tags WHERE image_id = ? AND tag = ?",
+                    (image_id, tag),
+                )
+            connection.execute("UPDATE gallery_images SET updated_at = ? WHERE id = ?", (timestamp, image_id))
+            touched += 1
+        connection.commit()
+    return touched
+
+
+def set_images_favorite(image_ids: list[str], favorite: bool) -> int:
+    ids = _clean_id_list(image_ids)
+    if not ids:
+        return 0
+
+    _ensure_ready()
+    timestamp = _now_iso()
+    with _gallery_lock, _connect() as connection:
+        touched = 0
+        for image_id in ids:
+            cursor = connection.execute(
+                "UPDATE gallery_images SET is_favorite = ?, updated_at = ? WHERE id = ?",
+                (1 if favorite else 0, timestamp, image_id),
+            )
+            touched += int(cursor.rowcount or 0)
+        connection.commit()
+    return touched
 
 
 def replace_tags(tags: list[str]) -> None:
@@ -172,6 +292,7 @@ def _init_db(connection: sqlite3.Connection) -> None:
             error_json TEXT,
             local_path TEXT NOT NULL,
             saved_file_path TEXT,
+            relative_path TEXT,
             thumbnail TEXT,
             width INTEGER,
             height INTEGER,
@@ -200,6 +321,16 @@ def _init_db(connection: sqlite3.Connection) -> None:
     connection.execute("CREATE INDEX IF NOT EXISTS idx_gallery_images_api_type ON gallery_images(api_type)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_gallery_images_favorite ON gallery_images(is_favorite)")
     connection.execute("CREATE INDEX IF NOT EXISTS idx_gallery_tags_tag ON gallery_image_tags(tag)")
+    _ensure_gallery_column(connection, "relative_path", "TEXT")
+
+
+def _ensure_gallery_column(connection: sqlite3.Connection, name: str, definition: str) -> None:
+    columns = {
+        row["name"]
+        for row in connection.execute("PRAGMA table_info(gallery_images)").fetchall()
+    }
+    if name not in columns:
+        connection.execute(f"ALTER TABLE gallery_images ADD COLUMN {name} {definition}")
 
 
 def _is_gallery_empty(connection: sqlite3.Connection) -> bool:
@@ -216,10 +347,11 @@ def _migrate_json_gallery(connection: sqlite3.Connection) -> None:
 
 
 def _load_json_gallery() -> dict[str, Any]:
-    if not GALLERY_FILE.exists():
+    gallery_file = Path(config.OPENAI_SAVE_DIR) / "gallery.json"
+    if not gallery_file.exists():
         return _empty_gallery()
     try:
-        with GALLERY_FILE.open("r", encoding="utf-8") as f:
+        with gallery_file.open("r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception:
         return _empty_gallery()
@@ -234,15 +366,16 @@ def _insert_images(connection: sqlite3.Connection, images: list[dict[str, Any]])
         connection.execute(
             """
             INSERT INTO gallery_images (
-                id, status, error_json, local_path, saved_file_path, thumbnail,
+                id, status, error_json, local_path, saved_file_path, relative_path, thumbnail,
                 width, height, prompt, api_type, params_json, created_at,
                 original_url_json, is_favorite, extra_json, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 status = excluded.status,
                 error_json = excluded.error_json,
                 local_path = excluded.local_path,
                 saved_file_path = excluded.saved_file_path,
+                relative_path = excluded.relative_path,
                 thumbnail = excluded.thumbnail,
                 width = excluded.width,
                 height = excluded.height,
@@ -261,6 +394,7 @@ def _insert_images(connection: sqlite3.Connection, images: list[dict[str, Any]])
                 _json_dumps(normalized.get("error")),
                 normalized["localPath"],
                 normalized.get("savedFilePath"),
+                normalized.get("relativePath"),
                 normalized.get("thumbnail"),
                 normalized.get("width"),
                 normalized.get("height"),
@@ -284,13 +418,29 @@ def _insert_images(connection: sqlite3.Connection, images: list[dict[str, Any]])
 
 def _normalize_image(image: dict[str, Any]) -> dict[str, Any]:
     extra = {key: value for key, value in image.items() if key not in KNOWN_IMAGE_KEYS}
+    relative_path = _relative_path_from_image(image)
+    local_path = str(image.get("localPath") or "")
+    saved_file_path = _optional_str(image.get("savedFilePath"))
+    thumbnail = _optional_str(image.get("thumbnail"))
+
+    if relative_path:
+        resolved_path = resolve_allowed_path(relative_path=relative_path)
+        if resolved_path:
+            local_path = serve_url_for_path(resolved_path)
+            if not thumbnail or _path_from_serve_url(thumbnail):
+                thumbnail = local_path
+        saved_file_path = None
+    else:
+        relative_path = None
+
     return {
         "id": str(image["id"]),
         "status": str(image.get("status") or "success"),
         "error": image.get("error"),
-        "localPath": str(image.get("localPath") or ""),
-        "savedFilePath": _optional_str(image.get("savedFilePath")),
-        "thumbnail": _optional_str(image.get("thumbnail")),
+        "localPath": local_path,
+        "savedFilePath": saved_file_path,
+        "relativePath": relative_path,
+        "thumbnail": thumbnail,
         "width": _optional_int(image.get("width")),
         "height": _optional_int(image.get("height")),
         "prompt": str(image.get("prompt") or ""),
@@ -307,11 +457,21 @@ def _normalize_image(image: dict[str, Any]) -> dict[str, Any]:
 def _row_to_image(row: sqlite3.Row, tags: list[str]) -> dict[str, Any]:
     extra = _json_loads(row["extra_json"], {})
     image = extra if isinstance(extra, dict) else {}
+    relative_path = row["relative_path"]
+    file_path = _row_file_path(row)
+    local_path = row["local_path"]
+    if relative_path:
+        local_path = f"/api/serve-image?path={quote(relative_path, safe='')}"
+    elif file_path:
+        local_path = f"/api/serve-image?path={quote(file_path, safe='')}"
+    thumbnail = row["thumbnail"] or local_path
+    if (relative_path or file_path) and _is_serve_image_url(thumbnail):
+        thumbnail = local_path
     image.update(
         {
             "id": row["id"],
             "status": row["status"],
-            "localPath": row["local_path"],
+            "localPath": local_path,
             "prompt": row["prompt"],
             "apiType": row["api_type"],
             "params": _json_loads(row["params_json"], {}),
@@ -320,9 +480,11 @@ def _row_to_image(row: sqlite3.Row, tags: list[str]) -> dict[str, Any]:
             "tags": _clean_tag_list(tags),
         }
     )
+    _set_if_present(image, "relativePath", relative_path)
     _set_if_present(image, "error", _json_loads(row["error_json"], None))
-    _set_if_present(image, "savedFilePath", row["saved_file_path"])
-    _set_if_present(image, "thumbnail", row["thumbnail"])
+    if not relative_path:
+        _set_if_present(image, "savedFilePath", file_path)
+    _set_if_present(image, "thumbnail", thumbnail)
     _set_if_present(image, "width", row["width"])
     _set_if_present(image, "height", row["height"])
     _set_if_present(image, "originalUrl", _json_loads(row["original_url_json"], None))
@@ -330,9 +492,46 @@ def _row_to_image(row: sqlite3.Row, tags: list[str]) -> dict[str, Any]:
 
 
 def _path_from_serve_url(value: str) -> str | None:
-    if "/api/serve-image?path=" not in value:
+    if "/api/serve-image" not in value:
         return None
-    return unquote(value.split("path=", 1)[1])
+    parsed = urlparse(value)
+    params = parse_qs(parsed.query)
+    raw_path = params.get("path", [None])[0]
+    if not raw_path:
+        return None
+    path = resolve_allowed_path(raw_path)
+    return str(path) if path else unquote(raw_path)
+
+
+def _is_serve_image_url(value: str | None) -> bool:
+    return bool(value and "/api/serve-image" in value)
+
+
+def _relative_path_from_image(image: dict[str, Any]) -> str | None:
+    explicit_relative = _optional_str(image.get("relativePath"))
+    if explicit_relative:
+        path = resolve_allowed_path(relative_path=explicit_relative)
+        if path:
+            return explicit_relative
+
+    candidates = [
+        image.get("savedFilePath"),
+        _path_from_serve_url(str(image.get("localPath") or "")),
+        _path_from_serve_url(str(image.get("thumbnail") or "")),
+    ]
+    for candidate in candidates:
+        relative_path = path_to_relative_path(candidate)
+        if relative_path:
+            return relative_path
+    return None
+
+
+def _row_file_path(row: sqlite3.Row) -> str | None:
+    if row["relative_path"]:
+        path = absolute_path_for_relative_path(row["relative_path"])
+        if path:
+            return str(path)
+    return row["saved_file_path"] or _path_from_serve_url(row["local_path"] or "")
 
 
 def _clean_tag_list(value: Any) -> list[str]:
@@ -350,6 +549,19 @@ def _clean_tag_list(value: Any) -> list[str]:
 
 def _clean_tag(value: Any) -> str:
     return str(value).strip() if value is not None else ""
+
+
+def _clean_id_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        image_id = str(item).strip() if item is not None else ""
+        if image_id and image_id not in seen:
+            cleaned.append(image_id)
+            seen.add(image_id)
+    return cleaned
 
 
 def _json_dumps(value: Any) -> str:

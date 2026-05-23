@@ -56,6 +56,7 @@ export function MainNav() {
     const location = useLocation();
     const inOps = location.pathname.startsWith('/ops');
     const inGallery = location.pathname.startsWith('/gallery') || location.pathname === '/';
+    const inSettings = location.pathname.startsWith('/settings');
 
     return (
         <aside className="glass-panel fixed left-4 top-1/2 z-50 hidden w-[4.25rem] -translate-y-1/2 flex-col items-center rounded-[1.75rem] px-2.5 py-3 md:flex">
@@ -72,12 +73,9 @@ export function MainNav() {
 
             <div className="my-3 h-px w-8 bg-gradient-to-r from-transparent via-white/15 to-transparent" />
 
-            <button className="premium-icon-button group relative inline-flex h-11 w-11 items-center justify-center rounded-[14px] text-[var(--text-secondary)]" title="全局设置" aria-label="全局设置">
+            <RailLink to="/settings/preferences" label="全局设置" active={inSettings}>
                 <Settings className="h-5 w-5" />
-                <span className="pointer-events-none absolute left-[calc(100%+10px)] top-1/2 z-50 -translate-y-1/2 whitespace-nowrap rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-1.5 text-xs text-[var(--text-primary)] opacity-0 shadow-lg backdrop-blur-xl transition-opacity group-hover:opacity-100">
-                    全局设置
-                </span>
-            </button>
+            </RailLink>
         </aside>
     );
 }

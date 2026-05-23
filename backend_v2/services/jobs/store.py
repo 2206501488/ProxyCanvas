@@ -38,6 +38,26 @@ def json_loads(value: str | None, fallback: Any) -> Any:
         return fallback
 
 
+def _redact_inline_images(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_redact_inline_images(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    item = dict(value)
+    url = item.get("url")
+    if isinstance(url, str) and url.startswith("data:"):
+        item["url"] = f"{url[:32]}...<inline image omitted>"
+    return item
+
+
+def sanitize_job_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Keep runtime params small; reference images are stored in input_images_json."""
+    cleaned = dict(params)
+    for key in ("image_urls", "imageUrls", "input_images", "inputImages"):
+        cleaned.pop(key, None)
+    return cleaned
+
+
 class JobStore:
     def __init__(self, path: str | Path):
         self.path = Path(path)
@@ -116,7 +136,7 @@ class JobStore:
                     provider,
                     "queued",
                     prompt,
-                    json_dumps(params),
+                    json_dumps(sanitize_job_params(params)),
                     json_dumps(input_images or []),
                     0,
                     "[]",
@@ -176,14 +196,16 @@ class JobStore:
         if result is None:
             current = self.get_job(job_id)
             result = (current or {}).get("result") or []
-        self.update_job(
-            job_id,
-            status=status,
-            progress=100 if status == "succeeded" else 0,
-            result_json=result,
-            error=error,
-            finished_at=now_iso(),
-        )
+        fields: dict[str, Any] = {
+            "status": status,
+            "progress": 100 if status == "succeeded" else 0,
+            "result_json": result,
+            "error": error,
+            "finished_at": now_iso(),
+        }
+        if status in {"succeeded", "failed", "cancelled", "timeout"}:
+            fields["input_images_json"] = self._redacted_input_images(job_id)
+        self.update_job(job_id, **fields)
 
     def add_event(self, job_id: str, level: str, message: str, data: Any = None) -> None:
         with self._lock, self.connect() as connection:
@@ -208,7 +230,20 @@ class JobStore:
             return item
 
     def list_jobs(self, *, status: str | None = None, active: bool = False, limit: int = 100) -> list[dict[str, Any]]:
-        query = "SELECT * FROM jobs"
+        query = """
+            SELECT
+                id, provider, status, prompt, external_task_id, progress, error,
+                attempts, max_attempts, created_at, updated_at, started_at, finished_at,
+                json_extract(params_json, '$.model') AS model,
+                json_extract(params_json, '$.size') AS size,
+                json_extract(params_json, '$.ratio') AS ratio,
+                json_extract(params_json, '$.n') AS n,
+                json_extract(params_json, '$.number') AS number,
+                json_extract(params_json, '$.imageCount') AS image_count,
+                json_array_length(input_images_json) AS input_image_count,
+                result_json
+            FROM jobs
+        """
         params: list[Any] = []
         if active:
             query += " WHERE status IN ('queued', 'submitting', 'running', 'saving')"
@@ -219,7 +254,7 @@ class JobStore:
         params.append(max(1, min(500, int(limit or 100))))
         with self._lock, self.connect() as connection:
             rows = connection.execute(query, params).fetchall()
-            return [self._row_to_dict(row) for row in rows]
+            return [self._row_to_summary(row) for row in rows]
 
     def cancel_job(self, job_id: str) -> dict[str, Any] | None:
         job = self.get_job(job_id)
@@ -307,10 +342,34 @@ class JobStore:
     def _row_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
         item["params"] = json_loads(item.pop("params_json", ""), {})
-        item["input_images"] = json_loads(item.pop("input_images_json", ""), [])
+        item["input_images"] = _redact_inline_images(json_loads(item.pop("input_images_json", ""), []))
         item["result"] = json_loads(item.pop("result_json", ""), [])
         item["job_id"] = item["id"]
         return item
+
+    def _row_to_summary(self, row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        params = {
+            "model": item.pop("model", None),
+            "size": item.pop("size", None),
+            "ratio": item.pop("ratio", None),
+            "n": item.pop("n", None),
+            "number": item.pop("number", None),
+            "imageCount": item.pop("image_count", None),
+        }
+        item["params"] = {key: value for key, value in params.items() if value not in (None, "")}
+        input_image_count = int(item.pop("input_image_count", 0) or 0)
+        item["input_images"] = [{} for _ in range(input_image_count)]
+        item["result"] = json_loads(item.pop("result_json", ""), [])
+        item["job_id"] = item["id"]
+        return item
+
+    def _redacted_input_images(self, job_id: str) -> list[dict[str, Any]]:
+        with self._lock, self.connect() as connection:
+            row = connection.execute("SELECT input_images_json FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        if not row:
+            return []
+        return _redact_inline_images(json_loads(row["input_images_json"], []))
 
     def _event_to_dict(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from config import HTTP_PROXIES, SOUSAKU_CONFIG_PATH, SOUSAKU_SAVE_DIR
+import config
 from services.reference_cache import load_reference_image
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +37,10 @@ _IMAGE_MODELS_FIXED_NUMBER = {
     "mj-image-niji-7",
 }
 
+def _sousaku_resolution(value: Any) -> str:
+    normalized = str(value or "").strip().upper()
+    return normalized.lower() if normalized in {"1K", "2K", "4K"} else str(value or "").strip()
+
 
 def _get_client() -> SousakuClient:
     global _CLIENT, _CLIENT_CONFIG_MTIME
@@ -47,14 +51,14 @@ def _get_client() -> SousakuClient:
     with _CLIENT_LOCK:
         config_mtime = _config_mtime()
         if _CLIENT is None or _CLIENT_CONFIG_MTIME != config_mtime:
-            _CLIENT = SousakuClient.from_config(SOUSAKU_CONFIG_PATH, save_dir=SOUSAKU_SAVE_DIR)
+            _CLIENT = SousakuClient.from_config(config.SOUSAKU_CONFIG_PATH, save_dir=config.SOUSAKU_SAVE_DIR)
             _CLIENT_CONFIG_MTIME = config_mtime
     return _CLIENT
 
 
 def _config_mtime() -> float | None:
     try:
-        return os.path.getmtime(SOUSAKU_CONFIG_PATH)
+        return os.path.getmtime(config.SOUSAKU_CONFIG_PATH)
     except OSError:
         return None
 
@@ -73,7 +77,7 @@ def create_task(data: dict[str, Any]) -> dict[str, Any]:
         n = 4
     resolution = ""
     if resolved_model in _IMAGE_MODEL_DEFAULT_RESOLUTIONS:
-        resolution = data.get("resolution") or _IMAGE_MODEL_DEFAULT_RESOLUTIONS[resolved_model]
+        resolution = _sousaku_resolution(data.get("resolution") or _IMAGE_MODEL_DEFAULT_RESOLUTIONS[resolved_model])
     auto_optimize = bool(data.get("auto_optimize", False))
     estimated_credits = client.estimate_credits(resolved_model, n)
     temp_paths: list[str] = []
@@ -133,7 +137,7 @@ def get_task(task_id: str) -> dict[str, Any]:
             if not saved_path:
                 try:
                     filename = _image_filename(task_id, index, image.url)
-                    saved_path = client.download_image(image, save_dir=SOUSAKU_SAVE_DIR, filename=filename)
+                    saved_path = client.download_image(image, save_dir=config.SOUSAKU_SAVE_DIR, filename=filename)
                     saved_for_task[image.url] = saved_path
                 except Exception:
                     saved_path = None
@@ -191,7 +195,7 @@ def refresh_account_records_for_tokens(tokens: list[str]) -> list[dict[str, Any]
         return records
 
     for token in normalized_tokens:
-        client = SousakuClient.from_config(SOUSAKU_CONFIG_PATH, tokens=[token], save_dir=SOUSAKU_SAVE_DIR)
+        client = SousakuClient.from_config(config.SOUSAKU_CONFIG_PATH, tokens=[token], save_dir=config.SOUSAKU_SAVE_DIR)
         try:
             record = client.get_account_record(include_token=True, include_raw=False)
         except Exception as exc:
@@ -268,7 +272,7 @@ def _reference_images_to_temp_files(image_urls: list[Any]) -> list[str]:
                 suffix = _suffix_from_content_type(mime_type)
                 content = base64.b64decode(b64_data)
             else:
-                image = load_reference_image(url, timeout=60, proxies=HTTP_PROXIES)
+                image = load_reference_image(url, timeout=60, proxies=config.HTTP_PROXIES)
                 suffix = image.suffix or _suffix_from_url(url)
                 content = image.data
 

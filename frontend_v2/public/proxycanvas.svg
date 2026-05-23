@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 42 42" role="img" aria-label="ProxyCanvas">
+  <rect width="42" height="42" rx="16" fill="#ffffff"/>
+  <path d="M13 11h18L14 31h18" fill="none" stroke="#2563eb" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="30" cy="12" r="3.5" fill="#38bdf8"/>
+  <circle cx="13" cy="30" r="3.5" fill="#2563eb" opacity="0.92"/>
+</svg>

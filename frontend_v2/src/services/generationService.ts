@@ -1,9 +1,8 @@
 /**
  * Generation Service - unified background job orchestration.
  *
- * The frontend submits every provider through the Job System. Provider-specific
- * request details stay in buildProviderRequest(), while execution, polling and
- * task history are handled by backend Provider Adapters.
+ * The frontend submits stable generation params through the Job System.
+ * Provider-specific payload translation lives in the backend Provider Adapters.
  */
 
 import type { GenerateParams, ImageItem, ThoughtImage } from '../types';
@@ -11,6 +10,7 @@ import {
     checkGenerationJob,
     createGenerationJob,
     type GenerationJob,
+    type RuntimeProvider,
 } from './api';
 
 export interface GenerationCallbacks {
@@ -23,6 +23,7 @@ export interface GenerationRequest {
     prompt: string;
     apiType: 'apimart' | 'openai' | 'nanobanana2' | 'cliproxy' | 'sousaku' | 'other';
     params: GenerateParams;
+    modelConfig?: RuntimeProvider['models'][number];
     imageUrls?: { url: string }[];
     placeholderIds: string[];
     maskDataUrl?: string;
@@ -38,148 +39,37 @@ type ProviderPayload = Record<string, unknown> & {
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function imageCountFor(request: GenerationRequest) {
-    return Math.max(1, request.placeholderIds.length || request.params.imageCount || 1);
+    const fixedCount = Number(request.modelConfig?.constraints?.fixedImageCount || 0);
+    return Math.max(1, fixedCount || request.placeholderIds.length || request.params.imageCount || Number(request.modelConfig?.defaults?.imageCount || 1) || 1);
 }
 
 function resolveProvider(apiType: GenerationRequest['apiType']) {
     return apiType === 'other' ? 'apimart' : apiType;
 }
 
-function normalizeSousakuModel(model: string) {
-    const aliases: Record<string, string> = {
-        low: 'gpt-image-2-low',
-        medium: 'gpt-image-2',
-        high: 'gpt-image-2-high',
-        'gpt-image-2-4k': 'gpt-image-2',
-        'gpt-image-2-medium': 'gpt-image-2',
-        'gpt-image-2-high-4k': 'gpt-image-2-high',
-    };
-    return aliases[model] || model;
-}
-
-function sousakuDefaultResolution(model: string) {
-    model = normalizeSousakuModel(model);
-    if (['gpt-image-2-low', 'gpt-image-2', 'gpt-image-2-high', 'wan-image-2.7-pro'].includes(model)) return '4k';
-    if (model === 'seedream-4.5') return '2k';
-    return undefined;
-}
-
-function sousakuFixedImageCount(model: string) {
-    model = normalizeSousakuModel(model);
-    return ['mj-image-v7', 'mj-image-niji-7'].includes(model) ? 4 : undefined;
-}
-
-function cliproxyPixelSize(params: GenerateParams) {
-    const cliproxySizeMap: Record<string, Record<string, string>> = {
-        '1:1': { '1K': '1024x1024', '2K': '2048x2048', '4K': '2880x2880' },
-        '3:2': { '1K': '1536x1024', '2K': '2048x1360', '4K': '3504x2336' },
-        '2:3': { '1K': '1024x1536', '2K': '1360x2048', '4K': '2336x3504' },
-        '4:3': { '1K': '1024x768', '2K': '2048x1536', '4K': '3264x2448' },
-        '3:4': { '1K': '768x1024', '2K': '1536x2048', '4K': '2448x3264' },
-        '5:4': { '1K': '1280x1024', '2K': '2560x2048', '4K': '3200x2560' },
-        '4:5': { '1K': '1024x1280', '2K': '2048x2560', '4K': '2560x3200' },
-        '16:9': { '1K': '1536x864', '2K': '2048x1152', '4K': '3840x2160' },
-        '9:16': { '1K': '864x1536', '2K': '1152x2048', '4K': '2160x3840' },
-        '2:1': { '1K': '2048x1024', '2K': '2688x1344', '4K': '3840x1920' },
-        '1:2': { '1K': '1024x2048', '2K': '1344x2688', '4K': '1920x3840' },
-        '21:9': { '1K': '2016x864', '2K': '2688x1152', '4K': '3840x1648' },
-        '9:21': { '1K': '864x2016', '2K': '1152x2688', '4K': '1648x3840' },
-    };
-    const ratio = params.ratio || '16:9';
-    const resolution = params.resolution || '2K';
-    if (resolution.includes('x')) return resolution;
-    return cliproxySizeMap[ratio]?.[resolution] || cliproxySizeMap[ratio]?.['2K'] || '2048x1152';
+function modelValueFor(provider: string, params: GenerateParams, modelConfig?: GenerationRequest['modelConfig']) {
+    if (modelConfig?.value) return modelConfig.value;
+    if (provider === 'apimart') return params.apimartModel || 'gemini-3-pro-image-preview';
+    if (provider === 'cliproxy') return params.cliproxyModel || 'gpt-image-2';
+    if (provider === 'sousaku') return params.sousakuModel || 'gpt-image-2';
+    return params.model || modelConfig?.value || '';
 }
 
 function buildProviderRequest(request: GenerationRequest): { provider: string; payload: ProviderPayload } {
-    const { prompt, apiType, params, imageUrls, maskDataUrl, maskFeather } = request;
+    const { prompt, apiType, params, modelConfig, imageUrls, maskDataUrl, maskFeather } = request;
     const provider = resolveProvider(apiType);
     const n = imageCountFor(request);
-
-    if (provider === 'sousaku') {
-        const sousakuModel = normalizeSousakuModel(params.sousakuModel || 'gpt-image-2');
-        const defaultResolution = sousakuDefaultResolution(sousakuModel);
-        const fixedCount = sousakuFixedImageCount(sousakuModel);
-        return {
-            provider,
-            payload: {
-                prompt,
-                size: params.ratio || '1:1',
-                resolution: defaultResolution ? (params.resolution || defaultResolution) : undefined,
-                auto_optimize: params.sousakuAutoOptimize ?? true,
-                n: fixedCount || n,
-                image_urls: imageUrls,
-                model: sousakuModel,
-            },
-        };
-    }
-
-    if (provider === 'nanobanana2') {
-        return {
-            provider,
-            payload: {
-                prompt,
-                size: params.ratio,
-                quality: params.quality,
-                n,
-                image_urls: imageUrls,
-                thinking_level: params.thinkingLevel || 'High',
-                mask_data: maskDataUrl,
-                feather: maskFeather,
-            },
-        };
-    }
-
-    if (provider === 'cliproxy') {
-        const cliproxyModel = params.cliproxyModel || 'gpt-image-2';
-        const ratio = params.ratio || '16:9';
-        const resolution = params.resolution || '2K';
-        return {
-            provider,
-            payload: {
-                prompt,
-                size: cliproxyModel === 'gemini-3.1-flash-image' ? ratio : cliproxyPixelSize(params),
-                quality: params.quality,
-                resolution,
-                n,
-                image_urls: imageUrls,
-                model: cliproxyModel,
-                mask_data: maskDataUrl,
-                feather: maskFeather,
-                input_max_edge: params.inputMaxEdge ? parseInt(params.inputMaxEdge, 10) : undefined,
-            },
-        };
-    }
-
-    if (provider === 'openai') {
-        return {
-            provider,
-            payload: {
-                prompt,
-                size: params.ratio || '16:9',
-                n,
-                image_urls: imageUrls,
-            },
-        };
-    }
-
-    const isOfficialGptImage2 = params.apimartModel === 'gpt-image-2-official';
+    const model = modelValueFor(provider, params, modelConfig);
     return {
-        provider: 'apimart',
+        provider,
         payload: {
             prompt,
-            size: params.ratio,
-            resolution: params.resolution,
+            ...params,
+            n,
             image_urls: imageUrls,
-            model: params.apimartModel || 'gemini-3-pro-image-preview',
+            model: model || undefined,
             mask_data: maskDataUrl,
             feather: maskFeather,
-            ...(isOfficialGptImage2
-                ? {
-                    quality: params.quality || 'high',
-                    moderation: params.moderation || 'low',
-                }
-                : {}),
         },
     };
 }

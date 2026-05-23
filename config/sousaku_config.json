@@ -2,7 +2,7 @@
   "tokens": [
     "your-sousaku-token"
   ],
-  "save_dir": "data/sousaku",
+  "save_dir": "gallery",
   "accounts_path": "sousaku_accounts.json",
   "model_credits": {
     "low": 2,
@@ -17,9 +17,10 @@
     "mj-image-niji-7": 2
   },
   "timeout": 30,
-  "generation_timeout": 1800,
+  "generation_timeout": 1200,
   "poll_interval": 3,
   "retry_total": 3,
   "auto_rotate_token": true,
-  "min_credit_threshold": 5
+  "min_credit_threshold": 5,
+  "disabled_tokens": []
 }

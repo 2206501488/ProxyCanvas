@@ -11,7 +11,7 @@ rem If you use conda, set the env name yourself, for example:
 rem set "BACKEND_CONDA_ENV=my_env"
 rem set "CHATGPT2API_CONDA_ENV=my_env"
 
-set "BACKEND_CONDA_ENV="
+set "BACKEND_CONDA_ENV=zimg"
 set "BACKEND_CMD=python -u app.py"
 
 rem Optional external service: CLIProxyAPI.

@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 
-from config import HTTP_PROXIES, OPENAI_SAVE_DIR
+import config
 
 
 @dataclass(frozen=True)
@@ -29,7 +29,7 @@ def _env_int(name: str, default: int) -> int:
 
 REFERENCE_CACHE_DIR = Path(os.getenv(
     "APIMART_REFERENCE_CACHE_DIR",
-    str(Path(OPENAI_SAVE_DIR) / "reference_cache"),
+    str(Path(config.OPENAI_SAVE_DIR) / "reference_cache"),
 ))
 REFERENCE_CACHE_TTL_SECONDS = _env_int("APIMART_REFERENCE_CACHE_TTL_SECONDS", 24 * 60 * 60)
 REFERENCE_CACHE_MAX_BYTES = _env_int("APIMART_REFERENCE_CACHE_MAX_BYTES", 2 * 1024 * 1024 * 1024)
@@ -51,7 +51,7 @@ def load_reference_image(url: str, *, timeout: int = 30, proxies: Any = None) ->
         if cached is not None:
             return cached
 
-    response = requests.get(url, timeout=timeout, proxies=HTTP_PROXIES if proxies is None else proxies)
+    response = requests.get(url, timeout=timeout, proxies=config.HTTP_PROXIES if proxies is None else proxies)
     response.raise_for_status()
     data = response.content
     content_type = _content_type(response.headers.get("Content-Type", ""))

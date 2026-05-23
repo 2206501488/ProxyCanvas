@@ -9,6 +9,7 @@ import { OpsLayout } from './pages/ops/OpsLayout';
 import { JobsPage } from './pages/ops/JobsPage';
 import { AccountsPage } from './pages/ops/AccountsPage';
 import { AnalyticsPage } from './pages/ops/AnalyticsPage';
+import { SettingsPage } from './pages/settings/SettingsPage';
 import { useStore } from './store';
 
 function GalleryPage() {
@@ -25,11 +26,13 @@ function GalleryPage() {
 function AppRoutes() {
   const loadGalleryFromServer = useStore((state) => state.loadGalleryFromServer);
   const loadBackendCapabilities = useStore((state) => state.loadBackendCapabilities);
+  const loadUiSettingsFromServer = useStore((state) => state.loadUiSettingsFromServer);
 
   useEffect(() => {
     loadBackendCapabilities();
+    loadUiSettingsFromServer();
     loadGalleryFromServer();
-  }, [loadBackendCapabilities, loadGalleryFromServer]);
+  }, [loadBackendCapabilities, loadGalleryFromServer, loadUiSettingsFromServer]);
 
   return (
     <div className="min-h-screen flex flex-col bg-[var(--bg-primary)]">
@@ -44,6 +47,9 @@ function AppRoutes() {
             <Route path="accounts" element={<AccountsPage />} />
             <Route path="analytics" element={<AnalyticsPage />} />
           </Route>
+          <Route path="/settings" element={<Navigate to="/settings/preferences" replace />} />
+          <Route path="/settings/:category" element={<SettingsPage />} />
+          <Route path="/settings/:category/:item" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/gallery" replace />} />
         </Routes>
       </div>

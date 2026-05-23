@@ -5,6 +5,7 @@ export interface ImageItem {
     error?: string;                            // Error message if failed
     localPath: string;           // Display URL (serve-image or data URI)
     savedFilePath?: string;      // Actual file system path for "Open Folder"
+    relativePath?: string;       // Path relative to OPENAI_SAVE_DIR
     thumbnail?: string;
     width?: number;
     height?: number;
@@ -25,6 +26,7 @@ export interface GenerateParams {
     resolution?: string; // 1K, 2K, 4K for APIMart
     moderation?: string; // GPT-Image-2 Official: auto, low
     imageCount?: number; // 生成数量 1-10
+    model?: string;       // Generic model id for configurable providers
     thinkingLevel?: string; // Nanobanana2: "High" or "Minimal"
     apimartModel?: string;  // APIMart: model name
     cliproxyModel?: string; // CLIProxyAPI: model name (default gpt-image-2)
