@@ -134,6 +134,10 @@ const GalleryCard = memo(function GalleryCard({ image, isSelected, selectionColo
     const toggleFavorite = useStore((s) => s.toggleFavorite);
     const removeImage = useStore((s) => s.removeImage);
     const deleteLocalFile = useStore((s) => s.deleteLocalFile);
+    const hasImageSize = Boolean(image.width && image.height && image.width > 0 && image.height > 0);
+    const imageFrameStyle: CSSProperties | undefined = hasImageSize
+        ? { aspectRatio: `${image.width} / ${image.height}` }
+        : undefined;
 
     return (
         <motion.div
@@ -156,7 +160,10 @@ const GalleryCard = memo(function GalleryCard({ image, isSelected, selectionColo
                     : 'border-[var(--border-subtle)] hover:border-sky-300/45 hover:shadow-[0_10px_24px_rgba(0,0,0,0.22)]'
             }`} style={isSelected ? selectedCardStyle(selectionColor) : undefined}>
                 {/* Image or Loading Placeholder */}
-                <div className="aspect-auto min-h-[120px]">
+                <div
+                    className={hasImageSize ? 'w-full overflow-hidden' : 'aspect-auto min-h-[120px]'}
+                    style={imageFrameStyle}
+                >
                     {image.status === 'loading' ? (
                         <div className="w-full h-48 flex flex-col items-center justify-center bg-[var(--bg-secondary)] gap-3">
                             <Loader2 className="w-8 h-8 animate-spin text-[var(--accent-primary)]" />
@@ -166,7 +173,9 @@ const GalleryCard = memo(function GalleryCard({ image, isSelected, selectionColo
                         <img
                             src={galleryThumbnailSrc(image)}
                             alt={image.prompt}
-                            className="w-full h-auto object-cover"
+                            width={hasImageSize ? image.width : undefined}
+                            height={hasImageSize ? image.height : undefined}
+                            className={hasImageSize ? 'w-full h-full object-cover' : 'w-full h-auto object-cover'}
                             loading="lazy"
                             decoding="async"
                             draggable={false}
